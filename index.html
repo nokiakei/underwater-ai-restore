@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:," />
+    <title>水下 AI 還原 Shallow-UWnet</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" />
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #04141d;
+        --bg-2: #07222f;
+        --panel: #0a2a3a;
+        --panel-2: #0d3347;
+        --line: #17506b;
+        --ink: #eaf6fa;
+        --ink-dim: #9dc3d1;
+        --ink-faint: #6d97a8;
+        --accent: #2fd6c8;
+        --accent-ink: #03222b;
+        --warn: #ffb454;
+        --danger: #ff7a7a;
+        --radius: 14px;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background:
+          radial-gradient(120% 60% at 50% -10%, #0a3648 0%, var(--bg) 55%) no-repeat,
+          var(--bg);
+        color: var(--ink);
+        font-family: "Noto Sans TC", "PingFang HK", "Microsoft JhengHei", system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        min-height: 100vh;
+      }
+      .wrap { max-width: 1060px; margin: 0 auto; padding: 18px 16px 56px; }
+
+      header.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+      h1 { font-size: 26px; font-weight: 900; letter-spacing: .02em; margin: 0; line-height: 1.25; }
+      h1 .sub { display: block; font-size: 13px; font-weight: 500; color: var(--ink-dim); margin-top: 4px; letter-spacing: 0; }
+      .status {
+        display: inline-flex; align-items: center; gap: 8px;
+        font-size: 13px; font-weight: 700;
+        padding: 7px 12px; border-radius: 999px;
+        border: 1px solid var(--line); background: var(--bg-2); color: var(--ink-dim);
+        white-space: nowrap;
+      }
+      .status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); flex: none; }
+      .status.ready { color: var(--accent); border-color: #1d7a72; }
+      .status.ready .dot { background: var(--accent); }
+      .status.error { color: var(--danger); border-color: #7a3434; }
+      .status.error .dot { background: var(--danger); }
+      .status.busy .dot { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: .35; } }
+
+      /* ---- upload zone ---- */
+      .dropzone {
+        margin-top: 16px;
+        border: 2px dashed var(--line);
+        border-radius: var(--radius);
+        background: var(--bg-2);
+        padding: 44px 20px;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color .15s, background .15s;
+      }
+      .dropzone:hover, .dropzone.drag { border-color: var(--accent); background: var(--panel); }
+      .dropzone svg { width: 52px; height: 52px; stroke: var(--accent); }
+      .dropzone .big { font-size: 19px; font-weight: 700; margin-top: 12px; }
+      .dropzone .small { font-size: 13.5px; color: var(--ink-dim); margin-top: 6px; line-height: 1.7; }
+      .dropzone .small b { color: var(--ink); }
+
+      /* ---- stage / compare ---- */
+      .stage {
+        margin-top: 16px;
+        position: relative;
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: #000;
+        border: 1px solid var(--line);
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        line-height: 0;
+      }
+      .stage canvas.result { display: block; width: 100%; height: auto; }
+      .stage canvas.orig {
+        position: absolute; inset: 0; width: 100%; height: 100%;
+      }
+      .stage .divider {
+        position: absolute; top: 0; bottom: 0; width: 2px;
+        background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 0 14px rgba(0,0,0,.5);
+        transform: translateX(-1px);
+        pointer-events: none;
+      }
+      .stage .divider::after {
+        content: "◂ ▸";
+        position: absolute; top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        background: #fff; color: #07303f;
+        font-size: 11px; font-weight: 900; letter-spacing: 1px;
+        padding: 6px 7px; border-radius: 999px; line-height: 1;
+        box-shadow: 0 2px 10px rgba(0,0,0,.5);
+        white-space: nowrap;
+      }
+      .tag {
+        position: absolute; top: 10px; z-index: 3;
+        font-size: 12px; font-weight: 700; line-height: 1;
+        padding: 6px 10px; border-radius: 999px;
+        background: rgba(2, 20, 28, .72); color: #dff4f9;
+        pointer-events: none;
+      }
+      .tag.l { left: 10px; }
+      .tag.r { right: 10px; color: var(--accent); }
+      .stage.sampling { cursor: crosshair; }
+      .stage.sampling canvas.orig { display: none; }
+      .sample-hint {
+        display: none;
+        margin-top: 10px; font-size: 13.5px; color: var(--warn); font-weight: 700;
+      }
+      .sample-hint.on { display: block; }
+
+      /* ---- controls ---- */
+      .controls {
+        margin-top: 16px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 18px 18px 8px;
+      }
+      .controls h2 { font-size: 15px; font-weight: 900; margin: 4px 0 10px; color: var(--ink); }
+      .controls h2:not(:first-child) { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 18px; }
+      .row { display: grid; grid-template-columns: 92px 1fr 58px; align-items: center; gap: 10px; padding: 7px 0; }
+      .row label { font-size: 14.5px; font-weight: 700; }
+      .row .val { font-size: 13.5px; font-weight: 700; color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
+      input[type="range"] {
+        -webkit-appearance: none; appearance: none;
+        width: 100%; height: 26px; background: transparent; cursor: pointer; margin: 0;
+      }
+      input[type="range"]::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: var(--panel-2); border: 1px solid var(--line); }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none; appearance: none;
+        width: 22px; height: 22px; border-radius: 50%;
+        background: var(--accent); border: 2px solid #bdf3ed;
+        margin-top: -9px; box-shadow: 0 1px 6px rgba(0,0,0,.5);
+      }
+      input[type="range"]::-moz-range-track { height: 6px; border-radius: 3px; background: var(--panel-2); border: 1px solid var(--line); }
+      input[type="range"]::-moz-range-thumb { width: 19px; height: 19px; border-radius: 50%; background: var(--accent); border: 2px solid #bdf3ed; }
+      input[type="range"]:disabled { opacity: .35; cursor: not-allowed; }
+
+      .btnrow { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0 14px; }
+      button.btn {
+        font-family: inherit; font-size: 14.5px; font-weight: 700;
+        border-radius: 10px; padding: 10px 16px;
+        border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
+        cursor: pointer; display: inline-flex; align-items: center; gap: 8px;
+      }
+      button.btn:hover { border-color: var(--accent); }
+      button.btn:disabled { opacity: .4; cursor: not-allowed; }
+      button.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+      button.btn.active { background: var(--warn); border-color: var(--warn); color: #33200a; }
+      .swatch { width: 16px; height: 16px; border-radius: 4px; border: 1px solid rgba(255,255,255,.5); background: transparent; display: none; }
+      .swatch.on { display: inline-block; }
+      .note { font-size: 12.5px; color: var(--ink-faint); line-height: 1.7; padding-bottom: 12px; }
+
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+      .actions .btn { padding: 12px 20px; font-size: 15px; }
+
+      .errbox {
+        display: none; margin-top: 14px;
+        background: #3d1420; border: 1px solid #8a2f3f; color: #ffd9d9;
+        border-radius: 10px; padding: 12px 14px; font-size: 14px; line-height: 1.6;
+      }
+      .errbox.on { display: block; }
+
+      footer { margin-top: 26px; font-size: 12.5px; color: var(--ink-faint); line-height: 1.8; }
+      .hidden { display: none !important; }
+
+      @media (max-width: 560px) {
+        h1 { font-size: 22px; }
+        .row { grid-template-columns: 76px 1fr 50px; gap: 8px; }
+        .controls { padding: 14px 14px 4px; }
+        .dropzone { padding: 34px 14px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .status.busy .dot { animation: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="top">
+        <h1>水下 AI 相片還原
+          <span class="sub">Shallow-UWnet 神經網絡去藍綠偏色，喺你部機本地運算，相片唔會上傳去任何伺服器。</span>
+        </h1>
+        <div class="status busy" id="modelStatus"><span class="dot"></span><span id="modelStatusText">AI 模型載入中…</span></div>
+      </header>
+
+      <div class="errbox" id="errBox"></div>
+
+      <!-- 上傳區 -->
+      <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="上傳相片">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="15" rx="2"></rect>
+          <circle cx="9" cy="10" r="1.6"></circle>
+          <path d="M3 17l5-4 4 3 3-2 6 5"></path>
+          <path d="M12 2v3M10 3.5L12 1.5 14 3.5"></path>
+        </svg>
+        <div class="big">撳呢度揀相，或者拖張相入嚟</div>
+        <div class="small">亦可以喺剪貼簿<b>貼上</b>（Ctrl / ⌘ + V）<br />支援 JPG、PNG、WebP；AI 會自動還原，再俾你手動微調。</div>
+      </div>
+      <input type="file" id="fileInput" accept="image/*" class="hidden" />
+
+      <!-- 對比舞台 -->
+      <div class="stage hidden" id="stage">
+        <canvas class="result" id="resultCanvas"></canvas>
+        <canvas class="orig" id="origCanvas"></canvas>
+        <div class="tag l">原圖</div>
+        <div class="tag r">還原</div>
+        <div class="divider" id="divider"></div>
+      </div>
+      <div class="sample-hint" id="sampleHint">💧 取樣模式：撳相入面最白或者中性灰嘅位置（例如白牆、白衫），做白平衡基準。</div>
+
+      <!-- 控制區 -->
+      <section class="controls hidden" id="controls">
+        <h2>AI 還原</h2>
+        <div class="row">
+          <label for="aiStrength">AI 強度</label>
+          <input type="range" id="aiStrength" min="0" max="100" step="1" value="70" />
+          <span class="val" id="aiStrengthVal">70%</span>
+        </div>
+
+        <h2>手動微調</h2>
+        <div class="btnrow">
+          <button class="btn" id="wbBtn" type="button">💧 水滴白平衡取樣</button>
+          <span class="swatch" id="wbSwatch"></span>
+          <button class="btn" id="wbClearBtn" type="button" disabled>清除白平衡</button>
+        </div>
+        <div class="row">
+          <label for="temp">色溫</label>
+          <input type="range" id="temp" min="-100" max="100" step="1" value="0" />
+          <span class="val" id="tempVal">0</span>
+        </div>
+        <div class="row">
+          <label for="tint">色調</label>
+          <input type="range" id="tint" min="-100" max="100" step="1" value="0" />
+          <span class="val" id="tintVal">0</span>
+        </div>
+        <div class="row">
+          <label for="bright">亮度</label>
+          <input type="range" id="bright" min="-50" max="50" step="1" value="0" />
+          <span class="val" id="brightVal">0</span>
+        </div>
+        <div class="row">
+          <label for="whiten">美白</label>
+          <input type="range" id="whiten" min="0" max="100" step="1" value="0" />
+          <span class="val" id="whitenVal">0%</span>
+        </div>
+        <div class="row">
+          <label for="denoise">降噪</label>
+          <input type="range" id="denoise" min="0" max="100" step="1" value="0" />
+          <span class="val" id="denoiseVal">0%</span>
+        </div>
+        <div class="note">貼士：先用 AI 強度定大方向；藍水相可以將色溫推向暖（正數）補返紅色；皮膚偏青就加少少美白。</div>
+      </section>
+
+      <div class="actions hidden" id="actions">
+        <button class="btn primary" id="downloadBtn" type="button">⬇ 下載還原圖（原尺寸 JPG）</button>
+        <button class="btn" id="resetBtn" type="button">↺ 重置微調</button>
+        <button class="btn" id="newPhotoBtn" type="button">換一張相</button>
+      </div>
+
+      <footer>
+        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。
+      </footer>
+    </div>
+
+    <script>
+    "use strict";
+    /* ============ 模型（分塊載入，model.partXX） ============ */
+    var MODEL_PARTS = 13;
+
+    function b64ToBytes(b64) {
+      var bin = atob(b64);
+      var bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
+    }
+
+    /* ============ DOM ============ */
+    function $(id) { return document.getElementById(id); }
+    var statusEl = $("modelStatus"), statusText = $("modelStatusText");
+    var errBox = $("errBox");
+    var dropzone = $("dropzone"), fileInput = $("fileInput");
+    var stage = $("stage"), resultCanvas = $("resultCanvas"), origCanvas = $("origCanvas");
+    var divider = $("divider"), sampleHint = $("sampleHint");
+    var controls = $("controls"), actions = $("actions");
+
+    function setStatus(mode, text) {
+      statusEl.className = "status " + mode;
+      statusText.textContent = text;
+    }
+    function showError(msg) {
+      errBox.textContent = msg;
+      errBox.classList.add("on");
+    }
+    function clearError() { errBox.classList.remove("on"); errBox.textContent = ""; }
+
+    /* ============ 狀態 ============ */
+    var session = null;          // ONNX InferenceSession
+    var modelReady = false;
+    var origImg = null;          // HTMLImageElement（原圖）
+    var fullW = 0, fullH = 0;    // 原圖尺寸
+    // 全尺寸畫布
+    var origFull = document.createElement("canvas");
+    var aiFull = null;           // AI 結果（全尺寸畫布）；AI 未跑／失敗時為 null
+    // 預覽尺寸（最長邊 <= 1280）畫布
+    var PV_MAX = 1280;
+    var origPv = document.createElement("canvas");
+    var aiPv = null;
+    var pvW = 0, pvH = 0;
+    var lastBasePv = null;       // 最近一次「AI 混合後、微調前」嘅預覽 ImageData（俾水滴取樣用）
+    var wb = null;               // {r,g,b} 白平衡倍率，null = 未取樣
+    var sampling = false;
+    var comparePos = 0.5;        // 對比分隔線位置 0..1
+    var renderQueued = false;
+
+    var sliders = {
+      ai: $("aiStrength"), temp: $("temp"), tint: $("tint"),
+      bright: $("bright"), whiten: $("whiten"), denoise: $("denoise")
+    };
+
+    /* ============ 模型載入 ============ */
+    function loadModel() {
+      if (typeof ort === "undefined") {
+        setStatus("error", "AI 程式庫載入失敗");
+        showError("載入唔到 ONNX Runtime 程式庫，請檢查網絡連線之後重新整理頁面。");
+        return;
+      }
+      try {
+        ort.env.wasm.numThreads = 1;
+        ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/";
+      } catch (e) { /* 環境設定失敗唔應該阻止載入 */ }
+      setStatus("busy", "下載 AI 模型…");
+      fetchModelParts()
+        .then(function (bytes) {
+          return ort.InferenceSession.create(bytes.buffer, { executionProviders: ["wasm"] });
+        })
+        .then(function (s) {
+          session = s;
+          modelReady = true;
+          setStatus("ready", "AI 模型已就緒");
+          if (origImg && !aiFull) runAI();
+        })
+        .catch(function (err) {
+          setStatus("error", "AI 模型載入失敗");
+          showError("AI 模型載入失敗：" + (err && err.message ? err.message : err) + "。你仍然可以用手動微調（將 AI 強度設為 0%）。");
+        });
+    }
+
+    /* 分塊下載模型並拼合（GitHub Pages 靜態託管） */
+    function fetchModelParts() {
+      var jobs = [];
+      for (var i = 0; i < MODEL_PARTS; i++) {
+        var name = "model.part" + (i < 10 ? "0" + i : "" + i);
+        jobs.push(fetch(name).then(function (r) {
+          if (!r.ok) throw new Error("下載 " + name + " 失敗（HTTP " + r.status + "）");
+          return r.text();
+        }));
+      }
+      return Promise.all(jobs).then(function (texts) {
+        return b64ToBytes(texts.join("").replace(/\s+/g, ""));
+      });
+    }
+
+    /* ============ 上傳 ============ */
+    function handleFile(file) {
+      if (!file) return;
+      if (file.type && file.type.indexOf("image/") !== 0) {
+        showError("呢個檔案唔係相片，請揀返一張相（JPG / PNG / WebP）。");
+        return;
+      }
+      clearError();
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        origImg = img;
+        fullW = img.naturalWidth; fullH = img.naturalHeight;
+        buildCanvases();
+        aiFull = null; aiPv = null;
+        wb = null; updateWbUI();
+        setSampling(false);
+        dropzone.classList.add("hidden");
+        stage.classList.remove("hidden");
+        controls.classList.remove("hidden");
+        actions.classList.remove("hidden");
+        updateCompare();
+        requestRender();
+        if (modelReady) runAI();
+        else setStatus("busy", "等緊 AI 模型載入…");
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        showError("讀唔到呢張相，試下另一張或者轉做 JPG 先。");
+      };
+      img.src = url;
+    }
+
+    function buildCanvases() {
+      origFull.width = fullW; origFull.height = fullH;
+      origFull.getContext("2d").drawImage(origImg, 0, 0);
+      var scale = Math.min(1, PV_MAX / Math.max(fullW, fullH));
+      pvW = Math.max(1, Math.round(fullW * scale));
+      pvH = Math.max(1, Math.round(fullH * scale));
+      origPv.width = pvW; origPv.height = pvH;
+      origPv.getContext("2d").drawImage(origImg, 0, 0, pvW, pvH);
+      resultCanvas.width = pvW; resultCanvas.height = pvH;
+      origCanvas.width = pvW; origCanvas.height = pvH;
+      origCanvas.getContext("2d").drawImage(origPv, 0, 0);
+    }
+
+    /* ============ AI 推理 ============ */
+    function runAI() {
+      if (!session || !origImg) return;
+      setStatus("busy", "AI 還原緊…");
+      // 等一 frame 先，等狀態文字畫出嚟
+      requestAnimationFrame(function () { setTimeout(doRunAI, 20); });
+    }
+
+    function doRunAI() {
+      try {
+        var MAXE = 512;
+        var scale = Math.min(1, MAXE / Math.max(fullW, fullH));
+        var w = Math.max(8, Math.round(fullW * scale / 8) * 8);
+        var h = Math.max(8, Math.round(fullH * scale / 8) * 8);
+        var small = document.createElement("canvas");
+        small.width = w; small.height = h;
+        var sctx = small.getContext("2d", { willReadFrequently: true });
+        sctx.drawImage(origImg, 0, 0, w, h);
+        var data = sctx.getImageData(0, 0, w, h).data;
+        var n = w * h;
+        var input = new Float32Array(3 * n);
+        for (var i = 0; i < n; i++) {
+          input[i] = data[i * 4] / 255;
+          input[n + i] = data[i * 4 + 1] / 255;
+          input[2 * n + i] = data[i * 4 + 2] / 255;
+        }
+        var tensor = new ort.Tensor("float32", input, [1, 3, h, w]);
+        session.run({ input: tensor }).then(function (results) {
+          try {
+            var out = results.output || results[Object.keys(results)[0]];
+            var od = out.data, dims = out.dims;
+            var oh = dims[2], ow = dims[3], on = ow * oh;
+            var outImg = new ImageData(ow, oh);
+            var px = outImg.data;
+            for (var j = 0; j < on; j++) {
+              px[j * 4] = Math.round(Math.min(1, Math.max(0, od[j])) * 255);
+              px[j * 4 + 1] = Math.round(Math.min(1, Math.max(0, od[on + j])) * 255);
+              px[j * 4 + 2] = Math.round(Math.min(1, Math.max(0, od[2 * on + j])) * 255);
+              px[j * 4 + 3] = 255;
+            }
+            var outCanvas = document.createElement("canvas");
+            outCanvas.width = ow; outCanvas.height = oh;
+            outCanvas.getContext("2d").putImageData(outImg, 0, 0);
+            aiFull = document.createElement("canvas");
+            aiFull.width = fullW; aiFull.height = fullH;
+            var afctx = aiFull.getContext("2d");
+            afctx.imageSmoothingEnabled = true; afctx.imageSmoothingQuality = "high";
+            afctx.drawImage(outCanvas, 0, 0, fullW, fullH);
+            aiPv = document.createElement("canvas");
+            aiPv.width = pvW; aiPv.height = pvH;
+            aiPv.getContext("2d").drawImage(outCanvas, 0, 0, pvW, pvH);
+            setStatus("ready", "AI 還原完成");
+            requestRender();
+          } catch (e2) {
+            setStatus("error", "AI 輸出處理失敗");
+            showError("AI 推理輸出處理出錯：" + (e2 && e2.message ? e2.message : e2));
+          }
+        }).catch(function (err) {
+          setStatus("error", "AI 推理失敗");
+          showError("AI 推理出錯：" + (err && err.message ? err.message : err) + "。可以將 AI 強度設為 0%，淨用手動微調。");
+        });
+      } catch (e) {
+        setStatus("error", "AI 推理失敗");
+        showError("AI 推理出錯：" + (e && e.message ? e.message : e) + "。可以將 AI 強度設為 0%，淨用手動微調。");
+      }
+    }
+
+    /* ============ 處理管線 ============ */
+    function getParams() {
+      return {
+        aiK: parseInt(sliders.ai.value, 10) / 100,
+        temp: parseInt(sliders.temp.value, 10) / 100,
+        tint: parseInt(sliders.tint.value, 10) / 100,
+        bright: parseInt(sliders.bright.value, 10) / 100,
+        whiten: parseInt(sliders.whiten.value, 10) / 100,
+        denoise: parseInt(sliders.denoise.value, 10) / 100
+      };
+    }
+
+    // 將 orig 畫布同 ai 畫布按 aiK 混合，攞 ImageData
+    function blendData(origC, aiC, w, h, k, ctx) {
+      ctx.globalAlpha = 1;
+      ctx.drawImage(origC, 0, 0, w, h);
+      if (aiC && k > 0) {
+        ctx.globalAlpha = k;
+        ctx.drawImage(aiC, 0, 0, w, h);
+        ctx.globalAlpha = 1;
+      }
+      return ctx.getImageData(0, 0, w, h);
+    }
+
+    // 簡單可分離 box blur（半徑 2），回傳新嘅 Uint8ClampedArray
+    function boxBlur(src, w, h) {
+      var r = 2, tmp = new Float32Array(src.length), out = new Float32Array(src.length);
+      var x, y, i, c, acc, cnt, xx, yy;
+      for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+          for (c = 0; c < 3; c++) {
+            acc = 0; cnt = 0;
+            for (xx = x - r; xx <= x + r; xx++) {
+              if (xx < 0 || xx >= w) continue;
+              acc += src[(y * w + xx) * 4 + c]; cnt++;
+            }
+            tmp[(y * w + x) * 4 + c] = acc / cnt;
+          }
+          tmp[(y * w + x) * 4 + 3] = 255;
+        }
+      }
+      for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+          for (c = 0; c < 3; c++) {
+            acc = 0; cnt = 0;
+            for (yy = y - r; yy <= y + r; yy++) {
+              if (yy < 0 || yy >= h) continue;
+              acc += tmp[(yy * w + x) * 4 + c]; cnt++;
+            }
+            out[(y * w + x) * 4 + c] = acc / cnt;
+          }
+          out[(y * w + x) * 4 + 3] = 255;
+        }
+      }
+      var res = new Uint8ClampedArray(src.length);
+      for (i = 0; i < src.length; i++) res[i] = out[i];
+      return res;
+    }
+
+    // 對 ImageData 做手動微調（原地修改），wb 用全域變數
+    function applyManual(imgData, p) {
+      var d = imgData.data;
+      var mR = (wb ? wb.r : 1) * (1 + 0.35 * p.temp);
+      var mG = (wb ? wb.g : 1) * (1 - 0.30 * p.tint);
+      var mB = (wb ? wb.b : 1) * (1 - 0.35 * p.temp);
+      var gain = 1 + p.bright;
+      mR *= gain; mG *= gain; mB *= gain;
+      var i, r, g, b;
+      for (i = 0; i < d.length; i += 4) {
+        r = d[i] * mR; g = d[i + 1] * mG; b = d[i + 2] * mB;
+        if (p.whiten > 0) {
+          var rn = r / 255, gn = g / 255, bn = b / 255;
+          if (rn > gn && gn > bn && rn > 0.4) {
+            var lift = 1 + 0.45 * p.whiten;
+            r *= lift; g *= lift; b *= lift;
+          }
+        }
+        d[i] = r; d[i + 1] = g; d[i + 2] = b;
+      }
+      if (p.denoise > 0) {
+        var blurred = boxBlur(d, imgData.width, imgData.height);
+        var k = p.denoise;
+        for (i = 0; i < d.length; i += 4) {
+          d[i] = d[i] * (1 - k) + blurred[i] * k;
+          d[i + 1] = d[i + 1] * (1 - k) + blurred[i + 1] * k;
+          d[i + 2] = d[i + 2] * (1 - k) + blurred[i + 2] * k;
+        }
+      }
+      return imgData;
+    }
+
+    var scratchPv = document.createElement("canvas");
+    function renderPreview() {
+      if (!origImg) return;
+      var p = getParams();
+      scratchPv.width = pvW; scratchPv.height = pvH;
+      var sctx = scratchPv.getContext("2d", { willReadFrequently: true });
+      var base = blendData(origPv, aiPv, pvW, pvH, p.aiK, sctx);
+      lastBasePv = new ImageData(new Uint8ClampedArray(base.data), pvW, pvH);
+      applyManual(base, p);
+      resultCanvas.getContext("2d").putImageData(base, 0, 0);
+    }
+
+    function requestRender() {
+      if (renderQueued) return;
+      renderQueued = true;
+      requestAnimationFrame(function () { renderQueued = false; renderPreview(); });
+    }
+
+    /* ============ 對比拖動 ============ */
+    function updateCompare() {
+      var pct = comparePos * 100;
+      divider.style.left = pct + "%";
+      origCanvas.style.clipPath = "inset(0 " + (100 - pct) + "% 0 0)";
+    }
+    var dragging = false;
+    function stagePos(e) {
+      var rect = stage.getBoundingClientRect();
+      var x = (e.clientX - rect.left) / rect.width;
+      return Math.min(1, Math.max(0, x));
+    }
+    stage.addEventListener("pointerdown", function (e) {
+      if (sampling) { sampleAt(e); return; }
+      dragging = true;
+      try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+      comparePos = stagePos(e);
+      updateCompare();
+    });
+    stage.addEventListener("pointermove", function (e) {
+      if (!dragging || sampling) return;
+      comparePos = stagePos(e);
+      updateCompare();
+    });
+    stage.addEventListener("pointerup", function () { dragging = false; });
+    stage.addEventListener("pointercancel", function () { dragging = false; });
+
+    /* ============ 水滴白平衡 ============ */
+    var wbBtn = $("wbBtn"), wbClearBtn = $("wbClearBtn"), wbSwatch = $("wbSwatch");
+    function setSampling(on) {
+      sampling = on;
+      stage.classList.toggle("sampling", on);
+      sampleHint.classList.toggle("on", on);
+      wbBtn.classList.toggle("active", on);
+      wbBtn.textContent = on ? "💧 撳相中白色位取樣…" : "💧 水滴白平衡取樣";
+    }
+    function updateWbUI() {
+      wbClearBtn.disabled = !wb;
+      if (wb && lastSampleRGB) {
+        wbSwatch.classList.add("on");
+        wbSwatch.style.background = "rgb(" + lastSampleRGB[0] + "," + lastSampleRGB[1] + "," + lastSampleRGB[2] + ")";
+      } else {
+        wbSwatch.classList.remove("on");
+      }
+    }
+    var lastSampleRGB = null;
+    function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+    function sampleAt(e) {
+      if (!lastBasePv) return;
+      var rect = stage.getBoundingClientRect();
+      var cx = Math.round((e.clientX - rect.left) / rect.width * pvW);
+      var cy = Math.round((e.clientY - rect.top) / rect.height * pvH);
+      var half = 7, sr = 0, sg = 0, sb = 0, cnt = 0;
+      var d = lastBasePv.data;
+      for (var y = cy - half; y <= cy + half; y++) {
+        for (var x = cx - half; x <= cx + half; x++) {
+          if (x < 0 || y < 0 || x >= pvW || y >= pvH) continue;
+          var i = (y * pvW + x) * 4;
+          sr += d[i]; sg += d[i + 1]; sb += d[i + 2]; cnt++;
+        }
+      }
+      if (!cnt) return;
+      var ar = sr / cnt, ag = sg / cnt, ab = sb / cnt;
+      lastSampleRGB = [Math.round(ar), Math.round(ag), Math.round(ab)];
+      var gray = (ar + ag + ab) / 3;
+      if (gray < 4) { showError("取樣位置太暗，做唔到白平衡基準，請撳光啲、白啲嘅位置。"); return; }
+      clearError();
+      wb = {
+        r: clamp(gray / Math.max(ar, 1), 0.25, 8.0),
+        g: clamp(gray / Math.max(ag, 1), 0.25, 8.0),
+        b: clamp(gray / Math.max(ab, 1), 0.25, 8.0)
+      };
+      setSampling(false);
+      updateWbUI();
+      requestRender();
+    }
+    wbBtn.addEventListener("click", function () { setSampling(!sampling); });
+    wbClearBtn.addEventListener("click", function () {
+      wb = null; lastSampleRGB = null; updateWbUI(); requestRender();
+    });
+
+    /* ============ 滑桿 ============ */
+    function bindSlider(el, valEl, suffix) {
+      var show = function () { valEl.textContent = el.value + suffix; };
+      el.addEventListener("input", function () { show(); requestRender(); });
+      show();
+    }
+    bindSlider(sliders.ai, $("aiStrengthVal"), "%");
+    bindSlider(sliders.temp, $("tempVal"), "");
+    bindSlider(sliders.tint, $("tintVal"), "");
+    bindSlider(sliders.bright, $("brightVal"), "");
+    bindSlider(sliders.whiten, $("whitenVal"), "%");
+    bindSlider(sliders.denoise, $("denoiseVal"), "%");
+
+    /* ============ 按鈕 ============ */
+    $("resetBtn").addEventListener("click", function () {
+      sliders.ai.value = 70; sliders.temp.value = 0; sliders.tint.value = 0;
+      sliders.bright.value = 0; sliders.whiten.value = 0; sliders.denoise.value = 0;
+      wb = null; lastSampleRGB = null; updateWbUI();
+      var ev = new Event("input");
+      [sliders.ai, sliders.temp, sliders.tint, sliders.bright, sliders.whiten, sliders.denoise]
+        .forEach(function (s) { s.dispatchEvent(ev); });
+      requestRender();
+    });
+    $("newPhotoBtn").addEventListener("click", function () { fileInput.click(); });
+    $("downloadBtn").addEventListener("click", function () {
+      if (!origImg) return;
+      var btn = this;
+      btn.disabled = true; btn.textContent = "⏳ 處理緊…";
+      setTimeout(function () {
+        try {
+          var p = getParams();
+          var out = document.createElement("canvas");
+          out.width = fullW; out.height = fullH;
+          var octx = out.getContext("2d", { willReadFrequently: true });
+          var imgData = blendData(origFull, aiFull, fullW, fullH, p.aiK, octx);
+          applyManual(imgData, p);
+          octx.putImageData(imgData, 0, 0);
+          out.toBlob(function (blob) {
+            btn.disabled = false; btn.textContent = "⬇ 下載還原圖（原尺寸 JPG）";
+            if (!blob) { showError("產生下載圖失敗，試下細啲嘅相。"); return; }
+            var a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "水下還原.jpg";
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+          }, "image/jpeg", 0.92);
+        } catch (e) {
+          btn.disabled = false; btn.textContent = "⬇ 下載還原圖（原尺寸 JPG）";
+          showError("下載處理出錯：" + (e && e.message ? e.message : e));
+        }
+      }, 30);
+    });
+
+    /* ============ 上傳事件 ============ */
+    dropzone.addEventListener("click", function () { fileInput.click(); });
+    dropzone.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+    });
+    fileInput.addEventListener("change", function () {
+      if (fileInput.files && fileInput.files[0]) handleFile(fileInput.files[0]);
+      fileInput.value = "";
+    });
+    ["dragenter", "dragover"].forEach(function (ev) {
+      document.addEventListener(ev, function (e) { e.preventDefault(); dropzone.classList.add("drag"); });
+    });
+    ["dragleave", "drop"].forEach(function (ev) {
+      document.addEventListener(ev, function (e) { e.preventDefault(); dropzone.classList.remove("drag"); });
+    });
+    document.addEventListener("drop", function (e) {
+      var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) handleFile(f);
+    });
+    document.addEventListener("paste", function (e) {
+      var items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf("image/") === 0) {
+          handleFile(items[i].getAsFile());
+          break;
+        }
+      }
+    });
+
+    /* ============ 啟動 ============ */
+    updateCompare();
+    loadModel();
+    </script>
+  </body>
+</html>
