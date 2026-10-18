@@ -231,8 +231,8 @@
         <h2>AI 還原</h2>
         <div class="row">
           <label for="aiStrength">AI 強度</label>
-          <input type="range" id="aiStrength" min="0" max="100" step="1" value="70" />
-          <span class="val" id="aiStrengthVal">70%</span>
+          <input type="range" id="aiStrength" min="0" max="100" step="1" value="100" />
+          <span class="val" id="aiStrengthVal">100%</span>
         </div>
 
         <h2>手動微調</h2>
@@ -253,8 +253,8 @@
         </div>
         <div class="row">
           <label for="bright">亮度</label>
-          <input type="range" id="bright" min="-50" max="50" step="1" value="0" />
-          <span class="val" id="brightVal">0</span>
+          <input type="range" id="bright" min="-50" max="50" step="1" value="25" />
+          <span class="val" id="brightVal">25</span>
         </div>
         <div class="row">
           <label for="whiten">美白</label>
@@ -433,6 +433,78 @@
       requestAnimationFrame(function () { setTimeout(doRunAI, 20); });
     }
 
+    /* ============ v2: chroma/luma 分離 + 自適應暖色 ============ */
+    // AI 在 512px 跑，放大會糊。改為：AI 只提供顏色（CbCr），原圖提供亮度細節（Y）。
+    // v3: CbCr 用原圖 Y 做引導嘅邊緣保持平滑（防顏色化開 bleed 到皮膚）。
+    // 再做自適應暖色：將 AI 顏色嘅 R/G 拉向 0.85、B/G 拉向 1.05。
+    function buildChromaAiPv(outCanvas, w, h) {
+      // 1. AI 輸出放大到預覽尺寸（顏色源）
+      var aiScaled = document.createElement("canvas");
+      aiScaled.width = w; aiScaled.height = h;
+      var actx = aiScaled.getContext("2d", { willReadFrequently: true });
+      actx.imageSmoothingEnabled = true; actx.imageSmoothingQuality = "high";
+      actx.drawImage(outCanvas, 0, 0, w, h);
+      var aiD = actx.getImageData(0, 0, w, h).data;
+      // 2. 原圖預覽（細節源，已經係 w×h）
+      var origD = origPv.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+      var n = w * h;
+      var Y = new Float32Array(n), cbR = new Float32Array(n), crR = new Float32Array(n);
+      var i, r1, g1, b1, r2, g2, b2;
+      for (i = 0; i < n; i++) {
+        r1 = origD[i*4]/255; g1 = origD[i*4+1]/255; b1 = origD[i*4+2]/255;
+        r2 = aiD[i*4]/255; g2 = aiD[i*4+1]/255; b2 = aiD[i*4+2]/255;
+        Y[i] = 0.299*r1 + 0.587*g1 + 0.114*b1;
+        cbR[i] = -0.168736*r2 - 0.331264*g2 + 0.5*b2 + 0.5;
+        crR[i] = 0.5*r2 - 0.418688*g2 - 0.081312*b2 + 0.5;
+      }
+      // 3. Y 引導嘅邊緣保持平滑（5×5，防 bleed）
+      var gr = 2, sigma = 0.08, s2 = 2*sigma*sigma;
+      var cbS = new Float32Array(n), crS = new Float32Array(n), ws = new Float32Array(n);
+      var dx, dy, x, y, xx, yy, idx, o, dY, wt;
+      for (dy = -gr; dy <= gr; dy++) {
+        for (dx = -gr; dx <= gr; dx++) {
+          for (y = 0; y < h; y++) {
+            yy = y + dy; if (yy < 0) yy = 0; if (yy >= h) yy = h - 1;
+            for (x = 0; x < w; x++) {
+              xx = x + dx; if (xx < 0) xx = 0; if (xx >= w) xx = w - 1;
+              idx = yy*w+xx; o = y*w+x;
+              dY = Y[idx] - Y[o];
+              wt = Math.exp(-(dY*dY)/s2);
+              cbS[o] += cbR[idx]*wt; crS[o] += crR[idx]*wt; ws[o] += wt;
+            }
+          }
+        }
+      }
+      for (i = 0; i < n; i++) { cbS[i] /= ws[i]; crS[i] /= ws[i]; }
+      // 4. 合併：Y ← 原圖，CbCr ← 平滑後 AI；逐像素轉回 RGB
+      var out = new ImageData(w, h);
+      var px = out.data;
+      var sumR = 0, sumG = 0, sumB = 0;
+      var cb, cr, rr, gg, bb;
+      for (i = 0; i < n; i++) {
+        cb = cbS[i]; cr = crS[i];
+        rr = Y[i] + 1.402*(cr-0.5);
+        gg = Y[i] - 0.344136*(cb-0.5) - 0.714136*(cr-0.5);
+        bb = Y[i] + 1.772*(cb-0.5);
+        rr = Math.min(1, Math.max(0, rr)); gg = Math.min(1, Math.max(0, gg)); bb = Math.min(1, Math.max(0, bb));
+        px[i*4] = Math.round(rr*255); px[i*4+1] = Math.round(gg*255); px[i*4+2] = Math.round(bb*255); px[i*4+3] = 255;
+        sumR += rr; sumG += gg; sumB += bb;
+      }
+      // 5. 自適應暖色：R/G → 0.85，B/G → 1.05（clamp 防爆）
+      var rg = sumR / Math.max(sumG, 1e-6), bg = sumB / Math.max(sumG, 1e-6);
+      var rGain = Math.min(1.6, Math.max(1.0, 0.85 / rg));
+      var bGain = Math.min(1.0, Math.max(0.6, 1.05 / bg));
+      if (rGain > 1.001 || bGain < 0.999) {
+        for (i = 0; i < px.length; i += 4) {
+          px[i] = Math.min(255, px[i] * rGain);
+          px[i+2] = Math.min(255, px[i+2] * bGain);
+        }
+      }
+      aiPv = document.createElement("canvas");
+      aiPv.width = w; aiPv.height = h;
+      aiPv.getContext("2d").putImageData(out, 0, 0);
+    }
+
     function doRunAI() {
       try {
         var MAXE = 512;
@@ -475,7 +547,9 @@
             afctx.drawImage(outCanvas, 0, 0, fullW, fullH);
             aiPv = document.createElement("canvas");
             aiPv.width = pvW; aiPv.height = pvH;
-            aiPv.getContext("2d").drawImage(outCanvas, 0, 0, pvW, pvH);
+            // v2: chroma/luma 分離 — AI 提供顏色，原圖提供細節（解決放大模糊）
+            // + 自適應暖色 — 拉向 R/G=0.85, B/G=1.05（解決 AI 偏藍偏冷）
+            buildChromaAiPv(outCanvas, pvW, pvH);
             setStatus("ready", "AI 還原完成");
             requestRender();
           } catch (e2) {
@@ -697,8 +771,8 @@
 
     /* ============ 按鈕 ============ */
     $("resetBtn").addEventListener("click", function () {
-      sliders.ai.value = 70; sliders.temp.value = 0; sliders.tint.value = 0;
-      sliders.bright.value = 0; sliders.whiten.value = 0; sliders.denoise.value = 0;
+      sliders.ai.value = 100; sliders.temp.value = 0; sliders.tint.value = 0;
+      sliders.bright.value = 25; sliders.whiten.value = 0; sliders.denoise.value = 0;
       wb = null; lastSampleRGB = null; updateWbUI();
       var ev = new Event("input");
       [sliders.ai, sliders.temp, sliders.tint, sliders.bright, sliders.whiten, sliders.denoise]
