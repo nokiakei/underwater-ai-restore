@@ -8,8 +8,26 @@
     <title>水下 AI 還原 Shallow-UWnet</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" />
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" crossorigin="anonymous" />
+    <script>
+/* v5: 註冊 coi-serviceworker 以啟用 crossOriginIsolated（libraw-wasm 的 SharedArrayBuffer 需要）。
+   GitHub Pages 俾唔到 COOP/COEP header，要用 SW 補。首次載入會靜默 reload 一次。 */
+(function(){
+  try{
+    if (window.crossOriginIsolated) return;
+    if (!('serviceWorker' in navigator)) return;
+    if (sessionStorage.getItem('coi-done')==='1') return;
+    navigator.serviceWorker.register('coi-serviceworker.js').then(function(){
+      sessionStorage.setItem('coi-done','1');
+      location.reload();
+    }).catch(function(){});
+  }catch(e){}
+})();
+</script>
+<script type="importmap">
+{"imports":{"libraw-wasm":"https://cdn.jsdelivr.net/npm/libraw-wasm@1.6.0/dist/index.js"}}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js" crossorigin="anonymous"></script>
     <style>
       :root {
         color-scheme: dark;
@@ -125,6 +143,13 @@
       }
       .sample-hint.on { display: block; }
 
+      .rawbadge {
+        margin-top: 10px; font-size: 13px; font-weight: 700; color: var(--accent);
+        border: 1px solid #1d7a72; background: var(--bg-2); border-radius: 10px;
+        padding: 8px 12px; line-height: 1.6;
+      }
+      .rawbadge small { color: var(--ink-dim); font-weight: 500; }
+
       /* ---- controls ---- */
       .controls {
         margin-top: 16px;
@@ -239,9 +264,9 @@
           <path d="M12 2v3M10 3.5L12 1.5 14 3.5"></path>
         </svg>
         <div class="big">撳呢度揀相，或者拖張相入嚟</div>
-        <div class="small">亦可以喺剪貼簿<b>貼上</b>（Ctrl / ⌘ + V）<br />支援 JPG、PNG、WebP；AI 會自動還原，再俾你手動微調。</div>
+        <div class="small">亦可以喺剪貼簿<b>貼上</b>（Ctrl / ⌘ + V）<br />支援 JPG、PNG、WebP、<b>相機 RAW</b>（CR2/NEF/ARW/DNG…，16-bit 解碼）、TIFF；AI 會自動還原，再俾你手動微調。</div>
       </div>
-      <input type="file" id="fileInput" accept="image/*" class="hidden" />
+      <input type="file" id="fileInput" accept="image/*,.cr2,.cr3,.nef,.nrw,.arw,.srf,.sr2,.dng,.orf,.rw2,.raf,.pef,.srw,.rwl,.3fr,.fff,.iiq,.x3f,.mrw,.crw,.erf,.kdc,.dcr,.mos,.tif,.tiff" class="hidden" />
 
       <!-- 對比舞台 -->
       <div class="stage hidden" id="stage">
@@ -252,6 +277,7 @@
         <div class="divider" id="divider"></div>
         <div class="brush-cursor" id="brushCursor"></div>
       </div>
+      <div class="rawbadge hidden" id="rawBadge"></div>
       <div class="sample-hint" id="sampleHint">💧 取樣模式：撳相入面最白或者中性灰嘅位置（例如白牆、白衫），做白平衡基準。</div>
 
       <!-- 控制區 -->
@@ -289,12 +315,10 @@
           <input type="range" id="whiten" min="0" max="100" step="1" value="0" />
           <span class="val" id="whitenVal">0%</span>
         </div>
-        <div class="row">
-          <label for="denoise">降噪</label>
-          <input type="range" id="denoise" min="0" max="100" step="1" value="0" />
-          <span class="val" id="denoiseVal">0%</span>
-        </div>
         <div class="note">貼士：先用 AI 強度定大方向；藍水相可以將色溫推向暖（正數）補返紅色；皮膚偏青就加少少美白。</div>
+
+        <!-- v5: 專業調整面板（由 JS 生成：基本/顏色/細節/效果） -->
+        <div id="proGroups"></div>
 
         <!-- v4: 選擇性調整 -->
         <details class="sel" id="selDetails" open>
@@ -409,6 +433,14 @@
     var skinCache = null;        // {mask, mw, mh, k}，預覽解像度快取
     var skinCacheKey = "";
 
+    /* ============ v5: RAW / 專業面板狀態 ============ */
+    var rawMode = false;             // 而家呢張係咪 RAW 解出嚟
+    var rawStore = null;             // {data:Float32Array(0-1), w, h} 16-bit 解碼暫存
+    var rawFullCanvas = null;        // RAW 開發後全解像 8-bit canvas（AI 輸入用）
+    var rawMeta = null;              // {camera, model...} 顯示用
+    var imgSrc = null;               // 上傳源：JPG=origImg(Image)，TIFF=canvas，RAW=null（用 rawFullCanvas）
+    var proBuilt = false;
+
     /* ============ v4: 筆刷狀態 ============ */
     var BRUSH_W = 160;           // 筆刷 mask 低解像闊度
     var brushCanvas = document.createElement("canvas");
@@ -419,7 +451,7 @@
 
     var sliders = {
       ai: $("aiStrength"), temp: $("temp"), tint: $("tint"),
-      bright: $("bright"), whiten: $("whiten"), denoise: $("denoise")
+      bright: $("bright"), whiten: $("whiten")
     };
 
     /* ============ 模型載入 ============ */
@@ -442,7 +474,7 @@
           session = s;
           modelReady = true;
           setStatus("ready", "AI 模型已就緒");
-          if (origImg && !aiFull) runAI();
+          if ((origImg || rawMode) && !aiFull) runAI();
         })
         .catch(function (err) {
           setStatus("error", "AI 模型載入失敗");
@@ -468,40 +500,26 @@
     /* ============ 上傳 ============ */
     function handleFile(file) {
       if (!file) return;
+      var name = file.name || "";
+      if (isRawFile(name)) { decodeRAW(file); return; }   // v5: 相機 RAW
+      if (isTiffFile(name)) { decodeTIFF(file); return; } // v5: TIFF
       if (file.type && file.type.indexOf("image/") !== 0) {
-        showError("呢個檔案唔係相片，請揀返一張相（JPG / PNG / WebP）。");
+        showError("呢個檔案唔係相片，請揀返一張相（JPG / PNG / WebP / RAW / TIFF）。");
         return;
       }
       clearError();
+      // v5: 切返普通相，重置 RAW 狀態
+      rawMode = false; rawStore = null; rawMeta = null; rawFullCanvas = null;
+      updateRawBadge();
       var url = URL.createObjectURL(file);
       var img = new Image();
       img.onload = function () {
         URL.revokeObjectURL(url);
         origImg = img;
+        imgSrc = img;
         fullW = img.naturalWidth; fullH = img.naturalHeight;
         buildCanvases();
-        aiFull = null; aiPv = null;
-        wb = null; updateWbUI();
-        // v4: 換相重置選擇性調整狀態
-        photoSeq++;
-        skinCache = null; skinCacheKey = "";
-        skinOn = true; skinAutoOff = false; updateSkinUI();
-        $("skinStrength").value = 70; $("skinStrengthVal").textContent = "70%";
-        setBrushMode(false);
-        brushParams.temp = 0; brushParams.bright = 0; brushParams.sat = 0;
-        $("brushTemp").value = 0; $("brushTempVal").textContent = "0";
-        $("brushBright").value = 0; $("brushBrightVal").textContent = "0";
-        $("brushSat").value = 0; $("brushSatVal").textContent = "0";
-        $("brushSize").value = 40; $("brushSizeVal").textContent = "40";
-        setSampling(false);
-        dropzone.classList.add("hidden");
-        stage.classList.remove("hidden");
-        controls.classList.remove("hidden");
-        actions.classList.remove("hidden");
-        updateCompare();
-        requestRender();
-        if (modelReady) runAI();
-        else setStatus("busy", "等緊 AI 模型載入…");
+        afterImageReady("JPG");
       };
       img.onerror = function () {
         URL.revokeObjectURL(url);
@@ -512,12 +530,12 @@
 
     function buildCanvases() {
       origFull.width = fullW; origFull.height = fullH;
-      origFull.getContext("2d").drawImage(origImg, 0, 0);
+      origFull.getContext("2d").drawImage(imgSrc, 0, 0);
       var scale = Math.min(1, PV_MAX / Math.max(fullW, fullH));
       pvW = Math.max(1, Math.round(fullW * scale));
       pvH = Math.max(1, Math.round(fullH * scale));
       origPv.width = pvW; origPv.height = pvH;
-      origPv.getContext("2d").drawImage(origImg, 0, 0, pvW, pvH);
+      origPv.getContext("2d").drawImage(imgSrc, 0, 0, pvW, pvH);
       resultCanvas.width = pvW; resultCanvas.height = pvH;
       origCanvas.width = pvW; origCanvas.height = pvH;
       origCanvas.getContext("2d").drawImage(origPv, 0, 0);
@@ -526,7 +544,7 @@
 
     /* ============ AI 推理 ============ */
     function runAI() {
-      if (!session || !origImg) return;
+      if (!session || (!origImg && !rawMode)) return;
       setStatus("busy", "AI 還原緊…");
       // 等一 frame 先，等狀態文字畫出嚟
       requestAnimationFrame(function () { setTimeout(doRunAI, 20); });
@@ -613,7 +631,7 @@
         var small = document.createElement("canvas");
         small.width = w; small.height = h;
         var sctx = small.getContext("2d", { willReadFrequently: true });
-        sctx.drawImage(origImg, 0, 0, w, h);
+        sctx.drawImage((rawMode && rawFullCanvas) ? rawFullCanvas : imgSrc, 0, 0, w, h);
         var data = sctx.getImageData(0, 0, w, h).data;
         var n = w * h;
         var input = new Float32Array(3 * n);
@@ -667,13 +685,30 @@
 
     /* ============ 處理管線 ============ */
     function getParams() {
+      function pv(id){ var e=$(id); return e?parseFloat(e.value):0; }
       return {
         aiK: parseInt(sliders.ai.value, 10) / 100,
         temp: parseInt(sliders.temp.value, 10) / 100,
         tint: parseInt(sliders.tint.value, 10) / 100,
         bright: parseInt(sliders.bright.value, 10) / 100,
         whiten: parseInt(sliders.whiten.value, 10) / 100,
-        denoise: parseInt(sliders.denoise.value, 10) / 100
+        rawMode: rawMode,
+        // v5 基本
+        exposure: pv('p_exposure'), contrast: pv('p_contrast'),
+        highlights: pv('p_highlights'), shadows: pv('p_shadows'),
+        whites: pv('p_whites'), blacks: pv('p_blacks'),
+        // v5 顏色
+        vibrance: pv('p_vibrance'), saturation: pv('p_saturation'),
+        hsl_r_h: pv('hsl_r_h'), hsl_r_s: pv('hsl_r_s'), hsl_r_l: pv('hsl_r_l'),
+        hsl_o_h: pv('hsl_o_h'), hsl_o_s: pv('hsl_o_s'), hsl_o_l: pv('hsl_o_l'),
+        hsl_y_h: pv('hsl_y_h'), hsl_y_s: pv('hsl_y_s'), hsl_y_l: pv('hsl_y_l'),
+        hsl_b_h: pv('hsl_b_h'), hsl_b_s: pv('hsl_b_s'), hsl_b_l: pv('hsl_b_l'),
+        // v5 細節
+        texture: pv('p_texture'), clarity: pv('p_clarity'),
+        sharpness: pv('p_sharp'), sharpRadius: pv('p_sharpR'),
+        dnLum: pv('p_dnLum'), dnCol: pv('p_dnCol'),
+        // v5 效果
+        vignette: pv('p_vignette'), grain: pv('p_grain')
       };
     }
 
@@ -722,38 +757,6 @@
       var res = new Uint8ClampedArray(src.length);
       for (i = 0; i < src.length; i++) res[i] = out[i];
       return res;
-    }
-
-    // 對 ImageData 做手動微調（原地修改），wb 用全域變數
-    function applyManual(imgData, p) {
-      var d = imgData.data;
-      var mR = (wb ? wb.r : 1) * (1 + 0.35 * p.temp);
-      var mG = (wb ? wb.g : 1) * (1 - 0.30 * p.tint);
-      var mB = (wb ? wb.b : 1) * (1 - 0.35 * p.temp);
-      var gain = 1 + p.bright;
-      mR *= gain; mG *= gain; mB *= gain;
-      var i, r, g, b;
-      for (i = 0; i < d.length; i += 4) {
-        r = d[i] * mR; g = d[i + 1] * mG; b = d[i + 2] * mB;
-        if (p.whiten > 0) {
-          var rn = r / 255, gn = g / 255, bn = b / 255;
-          if (rn > gn && gn > bn && rn > 0.4) {
-            var lift = 1 + 0.45 * p.whiten;
-            r *= lift; g *= lift; b *= lift;
-          }
-        }
-        d[i] = r; d[i + 1] = g; d[i + 2] = b;
-      }
-      if (p.denoise > 0) {
-        var blurred = boxBlur(d, imgData.width, imgData.height);
-        var k = p.denoise;
-        for (i = 0; i < d.length; i += 4) {
-          d[i] = d[i] * (1 - k) + blurred[i] * k;
-          d[i + 1] = d[i + 1] * (1 - k) + blurred[i + 1] * k;
-          d[i + 2] = d[i + 2] * (1 - k) + blurred[i + 2] * k;
-        }
-      }
-      return imgData;
     }
 
     /* ============ v4: 皮膚選區（YCbCr 膚色檢測） ============ */
@@ -861,7 +864,7 @@
       return false;
     }
 
-    // 筆刷區獨立調整：色溫（r/b 乘法，同 applyManual 一樣）、亮度（gain）、飽和（luma 混合）
+    // 筆刷區獨立調整：色溫（r/b 乘法）、亮度（gain）、飽和（luma 混合）
     function applyBrush(imgData, bp) {
       if (bp.temp === 0 && bp.bright === 0 && bp.sat === 0) return imgData;
       if (!brushHasPaint()) return imgData;
@@ -905,13 +908,15 @@
 
     var scratchPv = document.createElement("canvas");
     function renderPreview() {
-      if (!origImg) return;
+      if (!origImg && !rawMode) return;
       var p = getParams();
+      // v5: RAW 嘅曝光由 16-bit 重新開發（唔經 8-bit 乘法）
+      if (rawMode && rawStore) { developRawPreview(p.exposure); p.exposure = 0; }
       scratchPv.width = pvW; scratchPv.height = pvH;
       var sctx = scratchPv.getContext("2d", { willReadFrequently: true });
       var base = blendData(origPv, aiPv, pvW, pvH, p.aiK, sctx);
       lastBasePv = new ImageData(new Uint8ClampedArray(base.data), pvW, pvH);
-      // v4: 皮膚選區白平衡（喺 applyManual 之前）
+      // v5 管線：皮膚分區 → 筆刷 → 基本 → 顏色 → 細節 → 效果
       if (skinOn && !skinAutoOff) {
         var skin = getSkin(base, pvW, pvH, p.aiK);
         if (skin) {
@@ -921,9 +926,11 @@
           updateSkinUI();
         }
       }
-      applyManual(base, p);
-      // v4: 筆刷（喺 applyManual 之後、putImageData 之前）
       applyBrush(base, brushParams);
+      applyBasic(base, p);
+      applyColor(base, p);
+      applyDetail(base, p);
+      applyEffects(base, p);
       resultCanvas.getContext("2d").putImageData(base, 0, 0);
     }
 
@@ -1063,7 +1070,6 @@
     bindSlider(sliders.tint, $("tintVal"), "");
     bindSlider(sliders.bright, $("brightVal"), "");
     bindSlider(sliders.whiten, $("whitenVal"), "%");
-    bindSlider(sliders.denoise, $("denoiseVal"), "%");
 
     /* ============ v4: 皮膚選區＋筆刷 UI ============ */
     var skinBtn = $("skinBtn"), skinNote = $("skinNote");
@@ -1118,7 +1124,8 @@
     /* ============ 按鈕 ============ */
     $("resetBtn").addEventListener("click", function () {
       sliders.ai.value = 100; sliders.temp.value = 0; sliders.tint.value = 0;
-      sliders.bright.value = 25; sliders.whiten.value = 0; sliders.denoise.value = 0;
+      sliders.bright.value = 25; sliders.whiten.value = 0;
+      resetProSliders(); // v5: 重設專業面板
       wb = null; lastSampleRGB = null; updateWbUI();
       // v4: 重置選擇性調整
       skinOn = true; skinAutoOff = false; skinCache = null; updateSkinUI();
@@ -1129,14 +1136,14 @@
       $("brushTemp").value = 0; $("brushBright").value = 0; $("brushSat").value = 0;
       $("brushSize").value = 40;
       var ev = new Event("input");
-      [sliders.ai, sliders.temp, sliders.tint, sliders.bright, sliders.whiten, sliders.denoise,
+      [sliders.ai, sliders.temp, sliders.tint, sliders.bright, sliders.whiten,
        $("skinStrength"), $("brushTemp"), $("brushBright"), $("brushSat"), $("brushSize")]
         .forEach(function (s) { s.dispatchEvent(ev); });
       requestRender();
     });
     $("newPhotoBtn").addEventListener("click", function () { fileInput.click(); });
     $("downloadBtn").addEventListener("click", function () {
-      if (!origImg) return;
+      if (!origImg && !rawMode) return;
       var btn = this;
       btn.disabled = true; btn.textContent = "⏳ 處理緊…";
       setTimeout(function () {
@@ -1145,14 +1152,23 @@
           var out = document.createElement("canvas");
           out.width = fullW; out.height = fullH;
           var octx = out.getContext("2d", { willReadFrequently: true });
-          var imgData = blendData(origFull, aiFull, fullW, fullH, p.aiK, octx);
-          // v4: 下載都套用選擇性調整（皮膚 mask 用預覽解像度計、放大套用；筆刷同理）
+          // v5: RAW 下載由 16-bit 全解像重新開發（含曝光）
+          var pp = p;
+          if (rawMode && rawStore) {
+            developRawFull(p.exposure);
+            pp = {}; for (var kk in p) pp[kk] = p[kk]; pp.exposure = 0;
+          }
+          var imgData = blendData(origFull, aiFull, fullW, fullH, pp.aiK, octx);
+          // v5 管線：皮膚分區 → 筆刷 → 基本 → 顏色 → 細節 → 效果
           if (skinOn && !skinAutoOff) {
-            var dSkin = getSkin(lastBasePv, pvW, pvH, p.aiK);
+            var dSkin = getSkin(lastBasePv, pvW, pvH, pp.aiK);
             if (dSkin) applySkin(imgData, dSkin, parseInt($("skinStrength").value, 10) / 100);
           }
-          applyManual(imgData, p);
           applyBrush(imgData, brushParams);
+          applyBasic(imgData, pp);
+          applyColor(imgData, pp);
+          applyDetail(imgData, pp);
+          applyEffects(imgData, pp);
           octx.putImageData(imgData, 0, 0);
           out.toBlob(function (blob) {
             btn.disabled = false; btn.textContent = "⬇ 下載還原圖（原尺寸 JPG）";
@@ -1200,7 +1216,510 @@
       }
     });
 
+    /* ================================================================
+       v5: 專業調整面板 ＋ RAW/TIFF 支援
+       管線：RAW解碼 → AI還原 → 皮膚分區 → 筆刷 → 基本 → 顏色 → 細節 → 效果 → 輸出
+       ================================================================ */
+
+    /* ---------- 數學小工具 ---------- */
+    function sstep(e0, e1, x) {
+      var t = (x - e0) / (e1 - e0);
+      t = t < 0 ? 0 : (t > 1 ? 1 : t);
+      return t * t * (3 - 2 * t);
+    }
+    function angDist(h, c) {
+      var d = Math.abs(h - c) % 360;
+      return d > 180 ? 360 - d : d;
+    }
+    function rgb2hsl(r, g, b) {
+      var mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      var h = 0, s = 0, l = (mx + mn) / 2;
+      if (mx !== mn) {
+        var d = mx - mn;
+        s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+        if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
+        else if (mx === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        h *= 60;
+      }
+      return [h, s, l];
+    }
+    function hue2rgb(p, q, t) {
+      if (t < 0) t += 1; if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    }
+    function hsl2rgb(h, s, l) {
+      h = ((h % 360) + 360) % 360 / 360;
+      var r, g, b;
+      if (s === 0) { r = g = b = l; }
+      else {
+        var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        var p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1 / 3); g = hue2rgb(p, q, h); b = hue2rgb(p, q, h - 1 / 3);
+      }
+      return [r, g, b];
+    }
+    // 可分離 box blur（RGB，半徑 r），回傳 Float32Array
+    function boxBlurR(src, w, h, r) {
+      var n = w * h, tmp = new Float32Array(n * 3), out = new Float32Array(n * 3);
+      var x, y, xx, yy, c, acc, cnt;
+      for (y = 0; y < h; y++) for (x = 0; x < w; x++) for (c = 0; c < 3; c++) {
+        acc = 0; cnt = 0;
+        for (xx = x - r; xx <= x + r; xx++) { if (xx < 0 || xx >= w) continue; acc += src[(y * w + xx) * 3 + c]; cnt++; }
+        tmp[(y * w + x) * 3 + c] = acc / cnt;
+      }
+      for (y = 0; y < h; y++) for (x = 0; x < w; x++) for (c = 0; c < 3; c++) {
+        acc = 0; cnt = 0;
+        for (yy = y - r; yy <= y + r; yy++) { if (yy < 0 || yy >= h) continue; acc += tmp[(yy * w + x) * 3 + c]; cnt++; }
+        out[(y * w + x) * 3 + c] = acc / cnt;
+      }
+      return out;
+    }
+    // 單通道 box blur
+    function boxBlur1(src, w, h, r) {
+      var n = w * h, tmp = new Float32Array(n), out = new Float32Array(n);
+      var x, y, xx, yy, acc, cnt;
+      for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+        acc = 0; cnt = 0;
+        for (xx = x - r; xx <= x + r; xx++) { if (xx < 0 || xx >= w) continue; acc += src[y * w + xx]; cnt++; }
+        tmp[y * w + x] = acc / cnt;
+      }
+      for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
+        acc = 0; cnt = 0;
+        for (yy = y - r; yy <= y + r; yy++) { if (yy < 0 || yy >= h) continue; acc += tmp[yy * w + x]; cnt++; }
+        out[y * w + x] = acc / cnt;
+      }
+      return out;
+    }
+
+    /* ---------- v5 基本：曝光/對比/高光/陰影/白/黑/亮度 ---------- */
+    function applyBasic(imgData, p) {
+      var ev = p.rawMode ? 1 : Math.pow(2, p.exposure); // RAW：曝光已喺 develop 做
+      var cf = 1 + (p.contrast / 100) * 0.9;
+      var hlK = (p.highlights / 100) * 0.9, shK = (p.shadows / 100) * 0.9;
+      var whK = (p.whites / 100) * 0.32, blK = (p.blacks / 100) * 0.32;
+      var bg = 1 + p.bright;
+      if (ev === 1 && cf === 1 && !hlK && !shK && !whK && !blK && bg === 1) return imgData;
+      var d = imgData.data, i, r, g, b, l, hm, sm, wm, bm, f;
+      for (i = 0; i < d.length; i += 4) {
+        r = d[i] / 255 * ev; g = d[i + 1] / 255 * ev; b = d[i + 2] / 255 * ev;
+        r = 0.5 + (r - 0.5) * cf; g = 0.5 + (g - 0.5) * cf; b = 0.5 + (b - 0.5) * cf;
+        l = 0.299 * r + 0.587 * g + 0.114 * b;
+        hm = sstep(0.55, 0.95, l); sm = 1 - sstep(0.05, 0.45, l);
+        f = (1 + hlK * hm) * (1 + shK * sm);
+        r *= f; g *= f; b *= f;
+        wm = sstep(0.6, 1.0, l); bm = 1 - sstep(0.0, 0.4, l);
+        r += whK * wm; g += whK * wm; b += whK * wm;
+        r += blK * bm; g += blK * bm; b += blK * bm;
+        r *= bg; g *= bg; b *= bg;
+        d[i]     = Math.min(255, Math.max(0, r * 255));
+        d[i + 1] = Math.min(255, Math.max(0, g * 255));
+        d[i + 2] = Math.min(255, Math.max(0, b * 255));
+      }
+      return imgData;
+    }
+
+    /* ---------- v5 顏色：白平衡/色溫/色調/自然飽和/飽和/HSL/美白 ---------- */
+    var HSL_DEF = [
+      { c: 0,   hw: 17, id: "r" },
+      { c: 30,  hw: 17, id: "o" },
+      { c: 60,  hw: 17, id: "y" },
+      { c: 222, hw: 26, id: "b" }
+    ];
+    function applyColor(imgData, p) {
+      var mR = (wb ? wb.r : 1) * (1 + 0.35 * p.temp);
+      var mG = (wb ? wb.g : 1) * (1 - 0.30 * p.tint);
+      var mB = (wb ? wb.b : 1) * (1 - 0.35 * p.temp);
+      var vib = p.vibrance / 100, satK = 1 + (p.saturation / 100) * 0.9;
+      var hslOn = false, hc = [], k;
+      for (k = 0; k < 4; k++) {
+        var hsh = p["hsl_" + HSL_DEF[k].id + "_h"];
+        var hss = p["hsl_" + HSL_DEF[k].id + "_s"] / 100;
+        var hsl2 = p["hsl_" + HSL_DEF[k].id + "_l"] / 100;
+        if (hsh || hss || hsl2) hslOn = true;
+        hc.push({ def: HSL_DEF[k], h: hsh, s: hss, l: hsl2 });
+      }
+      var wht = p.whiten;
+      if (mR === 1 && mG === 1 && mB === 1 && !vib && satK === 1 && !hslOn && !wht) return imgData;
+      var d = imgData.data, i, r, g, b, avg, mx, mn, st, vb, j, wt, hsl, rgb;
+      for (i = 0; i < d.length; i += 4) {
+        r = d[i] / 255 * mR; g = d[i + 1] / 255 * mG; b = d[i + 2] / 255 * mB;
+        if (vib !== 0) { // 自然飽和度：低飽和像素加得多啲
+          avg = (r + g + b) / 3; mx = Math.max(r, g, b); mn = Math.min(r, g, b);
+          st = (mx - mn) / (mx + 1e-6); vb = 1 + vib * 0.7 * (1 - st);
+          r = avg + (r - avg) * vb; g = avg + (g - avg) * vb; b = avg + (b - avg) * vb;
+        }
+        if (satK !== 1) {
+          avg = (r + g + b) / 3;
+          r = avg + (r - avg) * satK; g = avg + (g - avg) * satK; b = avg + (b - avg) * satK;
+        }
+        if (hslOn) {
+          hsl = rgb2hsl(Math.min(1, Math.max(0, r)), Math.min(1, Math.max(0, g)), Math.min(1, Math.max(0, b)));
+          var hh = hsl[0], ss = hsl[1], ll = hsl[2];
+          for (j = 0; j < 4; j++) {
+            wt = 1 - sstep(hc[j].def.hw * 0.55, hc[j].def.hw, angDist(hh, hc[j].def.c));
+            if (wt > 0) {
+              hh += hc[j].h * wt;
+              ss *= (1 + hc[j].s * wt);
+              ll *= (1 + hc[j].l * wt);
+            }
+          }
+          ss = Math.min(1, Math.max(0, ss)); ll = Math.min(1, Math.max(0, ll));
+          rgb = hsl2rgb(hh, ss, ll); r = rgb[0]; g = rgb[1]; b = rgb[2];
+        }
+        if (wht > 0) {
+          if (r > g && g > b && r > 0.4) { var lift = 1 + 0.45 * wht; r *= lift; g *= lift; b *= lift; }
+        }
+        d[i]     = Math.min(255, Math.max(0, r * 255));
+        d[i + 1] = Math.min(255, Math.max(0, g * 255));
+        d[i + 2] = Math.min(255, Math.max(0, b * 255));
+      }
+      return imgData;
+    }
+
+    /* ---------- v5 細節：紋理/清晰度/銳利度/明度降噪/顏色降噪 ---------- */
+    function applyDetail(imgData, p) {
+      var tex = p.texture / 100, cla = p.clarity / 100, shp = p.sharpness / 100;
+      var dL = p.dnLum / 100, dC = p.dnCol / 100;
+      if (!tex && !cla && !shp && !dL && !dC) return imgData;
+      var w = imgData.width, h = imgData.height, d = imgData.data, n = w * h, i;
+      var f = new Float32Array(n * 3);
+      for (i = 0; i < n; i++) { f[i * 3] = d[i * 4]; f[i * 3 + 1] = d[i * 4 + 1]; f[i * 3 + 2] = d[i * 4 + 2]; }
+      var bT = null, bC = null, bS = null;
+      if (tex) bT = boxBlurR(f, w, h, 3);
+      if (cla) bC = boxBlurR(f, w, h, 8);
+      if (shp) bS = boxBlurR(f, w, h, Math.max(1, Math.round(p.sharpRadius * 2)));
+      var kT = tex * 0.5, kC = cla * 0.38, kS = shp * 0.85;
+      for (i = 0; i < n * 3; i++) {
+        var v = f[i];
+        if (tex) v += (f[i] - bT[i]) * kT;
+        if (cla) v += (f[i] - bC[i]) * kC;
+        if (shp) v += (f[i] - bS[i]) * kS;
+        f[i] = v;
+      }
+      if (dL > 0) { // 明度降噪：只郁 Y
+        var Y = new Float32Array(n), j;
+        for (j = 0; j < n; j++) Y[j] = 0.299 * f[j * 3] + 0.587 * f[j * 3 + 1] + 0.114 * f[j * 3 + 2];
+        var Yb = boxBlur1(Y, w, h, 2);
+        for (j = 0; j < n; j++) {
+          var dY = (Yb[j] - Y[j]) * dL;
+          f[j * 3] += dY; f[j * 3 + 1] += dY; f[j * 3 + 2] += dY;
+        }
+      }
+      if (dC > 0) { // 顏色降噪：luma 保留，chroma 向模糊版靠
+        var fb = boxBlurR(f, w, h, 4), j2;
+        for (j2 = 0; j2 < n; j2++) {
+          var r = f[j2 * 3], g = f[j2 * 3 + 1], b = f[j2 * 3 + 2];
+          var Yc = 0.299 * r + 0.587 * g + 0.114 * b;
+          var rb = fb[j2 * 3], gb = fb[j2 * 3 + 1], bb = fb[j2 * 3 + 2];
+          var Cc = (-0.168736 * r - 0.331264 * g + 0.5 * b), Rc = (0.5 * r - 0.418688 * g - 0.081312 * b);
+          var Cb = (-0.168736 * rb - 0.331264 * gb + 0.5 * bb), Rb = (0.5 * rb - 0.418688 * gb - 0.081312 * bb);
+          var Cb2 = Cc + (Cb - Cc) * dC, Cr2 = Rc + (Rb - Rc) * dC;
+          f[j2 * 3]     = Yc + 1.402 * Cr2;
+          f[j2 * 3 + 1] = Yc - 0.344136 * Cb2 - 0.714136 * Cr2;
+          f[j2 * 3 + 2] = Yc + 1.772 * Cb2;
+        }
+      }
+      for (i = 0; i < n; i++) {
+        d[i * 4]     = Math.min(255, Math.max(0, f[i * 3]));
+        d[i * 4 + 1] = Math.min(255, Math.max(0, f[i * 3 + 1]));
+        d[i * 4 + 2] = Math.min(255, Math.max(0, f[i * 3 + 2]));
+      }
+      return imgData;
+    }
+
+    /* ---------- v5 效果：暗角/顆粒 ---------- */
+    function applyEffects(imgData, p) {
+      var vig = p.vignette / 100, gr = p.grain / 100;
+      if (!vig && !gr) return imgData;
+      var w = imgData.width, h = imgData.height, d = imgData.data;
+      var x, y, i;
+      for (y = 0; y < h; y++) {
+        var dy = (y / (h - 1) - 0.5) * 2;
+        for (x = 0; x < w; x++) {
+          i = (y * w + x) * 4;
+          if (vig !== 0) {
+            var dx = (x / (w - 1) - 0.5) * 2;
+            var vm = sstep(0.35, 1.9, dx * dx + dy * dy);
+            var fv = 1 + vig * 0.55 * vm;
+            d[i] *= fv; d[i + 1] *= fv; d[i + 2] *= fv;
+          }
+          if (gr !== 0) {
+            var hh = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+            hh -= Math.floor(hh);
+            var nz = (hh - 0.5) * gr * 76;
+            d[i] += nz; d[i + 1] += nz; d[i + 2] += nz;
+          }
+        }
+      }
+      return imgData;
+    }
+
+    /* ---------- v5: 專業面板 UI 生成 ---------- */
+    var PRO_GROUPS = [
+      { title: "📷 基本", open: true, reset: "基本", rows: [
+        { id: "p_exposure", label: "曝光", min: -5, max: 5, step: 0.1, def: 0, suffix: "" },
+        { id: "p_contrast", label: "對比度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "p_highlights", label: "高光", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "p_shadows", label: "陰影", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "p_whites", label: "白色", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "p_blacks", label: "黑色", min: -100, max: 100, step: 1, def: 0, suffix: "" }
+      ]},
+      { title: "🎨 顏色", open: false, reset: "顏色", rows: [
+        { id: "p_vibrance", label: "自然飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "p_saturation", label: "飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_r_h", label: "紅・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
+        { id: "hsl_r_s", label: "紅・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_r_l", label: "紅・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_o_h", label: "橙・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
+        { id: "hsl_o_s", label: "橙・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_o_l", label: "橙・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_y_h", label: "黃・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
+        { id: "hsl_y_s", label: "黃・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_y_l", label: "黃・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_b_h", label: "藍・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
+        { id: "hsl_b_s", label: "藍・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_b_l", label: "藍・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" }
+      ]},
+      { title: "🔍 細節", open: false, reset: "細節", rows: [
+        { id: "p_texture", label: "紋理", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "p_clarity", label: "清晰度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "p_sharp", label: "銳利度", min: 0, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "p_sharpR", label: "銳利半徑", min: 0.5, max: 3, step: 0.1, def: 1, suffix: "" },
+        { id: "p_dnLum", label: "明度降噪", min: 0, max: 100, step: 1, def: 0, suffix: "%" },
+        { id: "p_dnCol", label: "顏色降噪", min: 0, max: 100, step: 1, def: 0, suffix: "%" }
+      ]},
+      { title: "✨ 效果", open: false, reset: "效果", rows: [
+        { id: "p_vignette", label: "暗角", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "p_grain", label: "顆粒", min: 0, max: 100, step: 1, def: 0, suffix: "" }
+      ]}
+    ];
+    function el(tag, cls, html) {
+      var e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (html != null) e.innerHTML = html;
+      return e;
+    }
+    function buildProGroups() {
+      if (proBuilt) return; proBuilt = true;
+      var host = $("proGroups");
+      if (!host) return;
+      PRO_GROUPS.forEach(function (g) {
+        var det = el("details", "sel"); if (g.open) det.open = true;
+        det.appendChild(el("summary", null, g.title));
+        var body = el("div", "sel-body"); det.appendChild(body);
+        g.rows.forEach(function (r) {
+          var row = el("div", "row");
+          var lab = el("label", null, r.label); lab.htmlFor = r.id;
+          var inp = document.createElement("input");
+          inp.type = "range"; inp.id = r.id;
+          inp.min = r.min; inp.max = r.max; inp.step = r.step; inp.value = r.def;
+          var val = el("span", "val", null); val.id = r.id + "Val";
+          row.appendChild(lab); row.appendChild(inp); row.appendChild(val);
+          body.appendChild(row);
+          bindSlider(inp, val, r.suffix || "");
+        });
+        var br = el("div", "btnrow");
+        var b = el("button", "btn", "↺ 重設" + g.reset);
+        b.type = "button";
+        (function (rows) {
+          b.addEventListener("click", function () {
+            rows.forEach(function (r) {
+              var e = $(r.id);
+              if (e) { e.value = r.def; e.dispatchEvent(new Event("input")); }
+            });
+            requestRender();
+          });
+        })(g.rows);
+        br.appendChild(b); body.appendChild(br);
+        host.appendChild(det);
+      });
+    }
+    function resetProSliders() {
+      PRO_GROUPS.forEach(function (g) {
+        g.rows.forEach(function (r) {
+          var e = $(r.id);
+          if (e) { e.value = r.def; e.dispatchEvent(new Event("input")); }
+        });
+      });
+    }
+
+    /* ---------- v5: RAW / TIFF 解碼 ---------- */
+    function isRawFile(name) {
+      return /\.(cr2|cr3|nef|nrw|arw|srf|sr2|dng|orf|rw2|raf|pef|srw|rwl|3fr|fff|iiq|x3f|mrw|crw|erf|kdc|dcr|mos)$/i.test(name || "");
+    }
+    function isTiffFile(name) {
+      return /\.tiff?$/i.test(name || "");
+    }
+    function loadScriptOnce(src) {
+      if (loadScriptOnce.cache[src]) return loadScriptOnce.cache[src];
+      var pr = new Promise(function (res, rej) {
+        var s = document.createElement("script");
+        s.src = src; s.crossOrigin = "anonymous";
+        s.onload = function () { res(); }; s.onerror = function () { rej(new Error("載入 " + src + " 失敗")); };
+        document.head.appendChild(s);
+      });
+      loadScriptOnce.cache[src] = pr;
+      return pr;
+    }
+    loadScriptOnce.cache = {};
+    function updateRawBadge() {
+      var badge = $("rawBadge");
+      if (!badge) return;
+      if (rawMode && rawStore) {
+        var mp = (rawStore.w * rawStore.h / 1e6).toFixed(1);
+        badge.innerHTML = "📷 RAW 16-bit 解碼" +
+          (rawMeta && rawMeta.model ? " · " + rawMeta.model : "") +
+          " · " + rawStore.w + "×" + rawStore.h + "（" + mp + "MP）" +
+          "<br><small>16-bit 線性解碼，曝光/高光/陰影推送唔會有斷層。曝光桿會由 16-bit 重新開發。</small>";
+        badge.classList.remove("hidden");
+      } else { badge.classList.add("hidden"); badge.innerHTML = ""; }
+    }
+    // 由 16-bit Float32 開發做 ImageData（dw×dh），ev = 曝光 EV
+    function developRawSampled(ev, dw, dh) {
+      var sw = rawStore.w, sh = rawStore.h, sd = rawStore.data;
+      var gain = Math.pow(2, ev);
+      var out = new ImageData(dw, dh), px = out.data;
+      var x, y, sx, sy, si, di;
+      for (y = 0; y < dh; y++) {
+        sy = Math.min(sh - 1, Math.round(y * sh / dh));
+        for (x = 0; x < dw; x++) {
+          sx = Math.min(sw - 1, Math.round(x * sw / dw));
+          si = (sy * sw + sx) * 3; di = (y * dw + x) * 4;
+          px[di]     = Math.min(255, Math.max(0, Math.round(Math.min(1, sd[si] * gain) * 255)));
+          px[di + 1] = Math.min(255, Math.max(0, Math.round(Math.min(1, sd[si + 1] * gain) * 255)));
+          px[di + 2] = Math.min(255, Math.max(0, Math.round(Math.min(1, sd[si + 2] * gain) * 255)));
+          px[di + 3] = 255;
+        }
+      }
+      return out;
+    }
+    function developRawPreview(ev) {
+      var img = developRawSampled(ev, pvW, pvH);
+      origPv.getContext("2d").putImageData(img, 0, 0);
+    }
+    function developRawFull(ev) {
+      var img = developRawSampled(ev, fullW, fullH);
+      if (!rawFullCanvas) rawFullCanvas = document.createElement("canvas");
+      rawFullCanvas.width = fullW; rawFullCanvas.height = fullH;
+      rawFullCanvas.getContext("2d").putImageData(img, 0, 0);
+      // 同步 origFull / origPv（AI 輸入同預覽基準）
+      origFull.width = fullW; origFull.height = fullH;
+      origFull.getContext("2d").drawImage(rawFullCanvas, 0, 0);
+      developRawPreview(ev);
+    }
+    function decodeRAW(file) {
+      setStatus("busy", "RAW 解碼緊（16-bit）…");
+      clearError();
+      var done = function () {};
+      var work = (async function () {
+        if (!window.crossOriginIsolated) {
+          throw new Error("此託管環境未啟用跨域隔離（SharedArrayBuffer），RAW 解碼用唔到。請轉做 TIFF/JPG 再試。");
+        }
+        var LibRawMod = await import("libraw-wasm");
+        var LibRaw = LibRawMod.default || LibRawMod;
+        var buf = new Uint8Array(await file.arrayBuffer());
+        var raw = new LibRaw();
+        var half = file.size > 24 * 1024 * 1024; // 特大 RAW 降半解像，防手機爆記憶體
+        var opened = raw.open(buf, { outputBps: 16, useCameraWb: true, outputColor: 1, halfSize: half, userQual: 3 });
+        var timeout = new Promise(function (_, rej) {
+          setTimeout(function () { rej(new Error("RAW 引擎載入超時（可能唔支援此裝置），請轉 TIFF/JPG。")); }, 60000);
+        });
+        await Promise.race([opened, timeout]);
+        var meta = null;
+        try { meta = await raw.metadata(); } catch (e) {}
+        var img = await raw.imageData();
+        try { raw.dispose(); } catch (e) {}
+        var w = img.width, h = img.height, data = img.data, n = w * h, i;
+        var f32 = new Float32Array(n * 3);
+        var u16 = null;
+        if (data instanceof Uint16Array) u16 = data;
+        else if (data && data.length === n * 6 && data.buffer) { try { u16 = new Uint16Array(data.buffer); } catch (e) {} }
+        if (u16 && u16.length >= n * 3) {
+          for (i = 0; i < n * 3; i++) f32[i] = u16[i] / 65535;
+        } else if (data && data.length >= n * 3) {
+          for (i = 0; i < n * 3; i++) f32[i] = data[i] / 255; // 8-bit fallback
+        } else {
+          throw new Error("解碼器回傳格式唔識處理（" + (data && data.length) + "）。");
+        }
+        return { f32: f32, w: w, h: h, meta: meta };
+      })();
+      work.then(function (r) {
+        rawMode = true;
+        rawStore = { data: r.f32, w: r.w, h: r.h };
+        rawMeta = r.meta;
+        fullW = r.w; fullH = r.h;
+        imgSrc = null; // RAW 用 rawFullCanvas
+        developRawFull(0);
+        afterImageReady("RAW");
+        updateRawBadge();
+        done();
+      }).catch(function (e) {
+        rawMode = false; rawStore = null;
+        setStatus("error", "RAW 解碼失敗");
+        showError("RAW 解碼失敗：" + (e && e.message ? e.message : e));
+        done();
+      });
+      return done;
+    }
+    function decodeTIFF(file) {
+      setStatus("busy", "TIFF 解碼緊…");
+      clearError();
+      loadScriptOnce("https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js").then(function () {
+        return file.arrayBuffer();
+      }).then(function (buf) {
+        var ifds = UTIF.decode(buf);
+        if (!ifds || !ifds.length) throw new Error("讀唔到 TIFF 結構");
+        var ifd = ifds[0];
+        UTIF.decodeImage(buf, ifd);
+        var rgba = UTIF.toRGBA8(ifd);
+        var w = ifd.width, h = ifd.height;
+        rawMode = false; rawStore = null; rawMeta = null;
+        fullW = w; fullH = h;
+        var c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        var id = new ImageData(new Uint8ClampedArray(rgba), w, h);
+        c.getContext("2d").putImageData(id, 0, 0);
+        imgSrc = c; // drawImage 食 canvas
+        origImg = null;
+        buildCanvases();
+        afterImageReady("TIFF");
+        updateRawBadge();
+      }).catch(function (e) {
+        setStatus("error", "TIFF 解碼失敗");
+        showError("TIFF 解碼失敗：" + (e && e.message ? e.message : e) + "。請轉 JPG/PNG 再試。");
+      });
+    }
+    // 上傳圖 ready 後嘅共通流程（JPG/TIFF/RAW 共用；RAW 唔經呢度，佢自己 develop）
+    function afterImageReady(kind) {
+      aiFull = null; aiPv = null;
+      wb = null; updateWbUI();
+      photoSeq++;
+      skinCache = null; skinCacheKey = "";
+      skinOn = true; skinAutoOff = false; updateSkinUI();
+      $("skinStrength").value = 70; $("skinStrengthVal").textContent = "70%";
+      setBrushMode(false);
+      brushParams.temp = 0; brushParams.bright = 0; brushParams.sat = 0;
+      $("brushTemp").value = 0; $("brushTempVal").textContent = "0";
+      $("brushBright").value = 0; $("brushBrightVal").textContent = "0";
+      $("brushSat").value = 0; $("brushSatVal").textContent = "0";
+      $("brushSize").value = 40; $("brushSizeVal").textContent = "40";
+      setSampling(false);
+      dropzone.classList.add("hidden");
+      stage.classList.remove("hidden");
+      controls.classList.remove("hidden");
+      actions.classList.remove("hidden");
+      updateCompare();
+      requestRender();
+      if (modelReady) runAI();
+      else setStatus("busy", "等緊 AI 模型載入…");
+    }
+
     /* ============ 啟動 ============ */
+    buildProGroups(); // v5: 生成專業調整面板
     updateCompare();
     loadModel();
     </script>
