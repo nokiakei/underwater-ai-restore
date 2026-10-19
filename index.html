@@ -10,22 +10,12 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" crossorigin="anonymous" />
     <script>
-/* v5: 註冊 coi-serviceworker 以啟用 crossOriginIsolated（libraw-wasm 的 SharedArrayBuffer 需要）。
-   GitHub Pages 俾唔到 COOP/COEP header，要用 SW 補。首次載入會靜默 reload 一次。 */
-(function(){
-  try{
-    if (window.crossOriginIsolated) return;
-    if (!('serviceWorker' in navigator)) return;
-    if (sessionStorage.getItem('coi-done')==='1') return;
-    navigator.serviceWorker.register('coi-serviceworker.js').then(function(){
-      sessionStorage.setItem('coi-done','1');
-      location.reload();
-    }).catch(function(){});
-  }catch(e){}
-})();
+/* v5.1: 轉用 libraw-wasm@1.1.0（單線程版，唔需要 SharedArrayBuffer / 跨域隔離）。
+   之前 1.6.0 係 pthreads build，要 COOP/COEP header，GitHub Pages 俾唔到，
+   coi-serviceworker workaround 喺手機唔可靠。1.1.0 解碼慢啲，但咩環境都 work。 */
 </script>
 <script type="importmap">
-{"imports":{"libraw-wasm":"https://cdn.jsdelivr.net/npm/libraw-wasm@1.6.0/dist/index.js"}}
+{"imports":{"libraw-wasm":"https://cdn.jsdelivr.net/npm/libraw-wasm@1.1.0/dist/index.js"}}
 </script>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js" crossorigin="anonymous"></script>
     <style>
@@ -1616,9 +1606,7 @@
       clearError();
       var done = function () {};
       var work = (async function () {
-        if (!window.crossOriginIsolated) {
-          throw new Error("此託管環境未啟用跨域隔離（SharedArrayBuffer），RAW 解碼用唔到。請轉做 TIFF/JPG 再試。");
-        }
+        /* v5.1: libraw-wasm@1.1.0 係單線程版，唔需要 crossOriginIsolated */
         var LibRawMod = await import("libraw-wasm");
         var LibRaw = LibRawMod.default || LibRawMod;
         var buf = new Uint8Array(await file.arrayBuffer());
