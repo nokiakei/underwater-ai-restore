@@ -15,8 +15,13 @@
    coi-serviceworker workaround 喺手機唔可靠。1.1.0 解碼慢啲，但咩環境都 work。 */
 </script>
 <script type="importmap">
-{"imports":{"libraw-wasm":"https://cdn.jsdelivr.net/npm/libraw-wasm@1.1.0/dist/index.js"}}
+{"imports":{
+  "libraw-wasm":"https://cdn.jsdelivr.net/npm/libraw-wasm@1.1.0/libraw.js",
+  "libraw-wasm-dist":"https://cdn.jsdelivr.net/npm/libraw-wasm@1.1.0/dist/index.js"
+}}
 </script>
+<!-- v6: RAW 改用主線程 Emscripten + 同源 WASM（唔經 cross-origin worker，唔會靜默超時）。
+     libraw.js 由 CDN 載入（104KB），libraw.wasm 由本站 raw/wasm.partXX 拼合經 wasmBinary 注入。 -->
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js" crossorigin="anonymous"></script>
     <style>
       :root {
@@ -127,6 +132,18 @@
       .tag.r { right: 10px; color: var(--accent); }
       .stage.sampling { cursor: crosshair; }
       .stage.sampling canvas.orig { display: none; }
+      /* v6: 相片 sticky 固定，碌控制面板嗰陣都睇到 */
+      .stage.sticky {
+        position: sticky; top: 0; z-index: 20;
+        margin-top: 0; border-radius: 0 0 var(--radius) var(--radius);
+        max-height: 42vh; background: #02141c;
+      }
+      .stage.sticky canvas.result { max-height: 42vh; width: auto; max-width: 100%; margin: 0 auto; }
+      .stage.sticky canvas.orig { height: 100%; }
+      @media (min-width: 561px) {
+        .stage.sticky { max-height: 52vh; }
+        .stage.sticky canvas.result { max-height: 52vh; }
+      }
       .sample-hint {
         display: none;
         margin-top: 10px; font-size: 13.5px; color: var(--warn); font-weight: 700;
@@ -211,17 +228,6 @@
       details.sel .sel-body { padding: 2px 14px 10px; }
       .sel-sub { font-size: 13px; font-weight: 900; color: var(--accent); margin: 12px 0 2px; }
       .sel-sub:first-child { margin-top: 4px; }
-      .brush-cursor {
-        position: absolute; border: 2px solid #fff; border-radius: 50%;
-        pointer-events: none; z-index: 4; display: none; line-height: 0;
-        box-shadow: 0 0 0 1px rgba(0,0,0,.55), 0 0 12px rgba(0,0,0,.35);
-        transform: translate(-50%, -50%);
-        background: rgba(255,255,255,.06);
-      }
-      .stage.brushmode .brush-cursor { display: block; }
-      .stage.brushmode { cursor: none; }
-      .stage.brushmode canvas.orig { display: none; }
-      .stage.brushmode .divider { display: none; }
 
       @media (max-width: 560px) {
         h1 { font-size: 22px; }
@@ -259,13 +265,12 @@
       <input type="file" id="fileInput" accept="image/*,.cr2,.cr3,.nef,.nrw,.arw,.srf,.sr2,.dng,.orf,.rw2,.raf,.pef,.srw,.rwl,.3fr,.fff,.iiq,.x3f,.mrw,.crw,.erf,.kdc,.dcr,.mos,.tif,.tiff" class="hidden" />
 
       <!-- 對比舞台 -->
-      <div class="stage hidden" id="stage">
+      <div class="stage hidden sticky" id="stage">
         <canvas class="result" id="resultCanvas"></canvas>
         <canvas class="orig" id="origCanvas"></canvas>
         <div class="tag l">原圖</div>
         <div class="tag r">還原</div>
         <div class="divider" id="divider"></div>
-        <div class="brush-cursor" id="brushCursor"></div>
       </div>
       <div class="rawbadge hidden" id="rawBadge"></div>
       <div class="sample-hint" id="sampleHint">💧 取樣模式：撳相入面最白或者中性灰嘅位置（例如白牆、白衫），做白平衡基準。</div>
@@ -312,7 +317,7 @@
 
         <!-- v4: 選擇性調整 -->
         <details class="sel" id="selDetails" open>
-          <summary>🎯 選擇性調整（皮膚選區＋筆刷）</summary>
+          <summary>🎯 選擇性調整（皮膚選區）</summary>
           <div class="sel-body">
             <div class="sel-sub">🤚 皮膚選區白平衡</div>
             <div class="btnrow">
@@ -323,34 +328,14 @@
               <input type="range" id="skinStrength" min="0" max="100" step="1" value="70" />
               <span class="val" id="skinStrengthVal">70%</span>
             </div>
+            <div class="row">
+              <label for="smoothSkin">✨ 磨皮</label>
+              <input type="range" id="smoothSkin" min="0" max="100" step="1" value="0" />
+              <span class="val" id="smoothSkinVal">0%</span>
+            </div>
+            <div class="note">磨皮只喺皮膚區做邊緣保留平滑，去皺紋豆豆唔糊五官。美白喺「手動微調」。</div>
             <div class="note" id="skinNote">自動偵測膚色（YCbCr），只將皮膚區拉向中性，藍色背景唔郁。如果偵測到皮膚少過 0.5%，會自動停用。</div>
 
-            <div class="sel-sub">🖌️ 手動筆刷</div>
-            <div class="btnrow">
-              <button class="btn" id="brushBtn" type="button">🖌️ 筆刷模式：關</button>
-              <button class="btn" id="brushClearBtn" type="button">清除筆刷</button>
-            </div>
-            <div class="row">
-              <label for="brushSize">筆刷大細</label>
-              <input type="range" id="brushSize" min="10" max="100" step="1" value="40" />
-              <span class="val" id="brushSizeVal">40</span>
-            </div>
-            <div class="row">
-              <label for="brushTemp">筆刷色溫</label>
-              <input type="range" id="brushTemp" min="-100" max="100" step="1" value="0" />
-              <span class="val" id="brushTempVal">0</span>
-            </div>
-            <div class="row">
-              <label for="brushBright">筆刷亮度</label>
-              <input type="range" id="brushBright" min="-50" max="50" step="1" value="0" />
-              <span class="val" id="brushBrightVal">0</span>
-            </div>
-            <div class="row">
-              <label for="brushSat">筆刷飽和</label>
-              <input type="range" id="brushSat" min="-50" max="50" step="1" value="0" />
-              <span class="val" id="brushSatVal">0</span>
-            </div>
-            <div class="note">筆刷模式開著時，直接喺預覽圖上拖動塗抹（白色＝選中區）。筆刷區獨立調整色溫／亮度／飽和，同皮膚選區唔衝突。</div>
           </div>
         </details>
       </section>
@@ -431,13 +416,7 @@
     var imgSrc = null;               // 上傳源：JPG=origImg(Image)，TIFF=canvas，RAW=null（用 rawFullCanvas）
     var proBuilt = false;
 
-    /* ============ v4: 筆刷狀態 ============ */
-    var BRUSH_W = 160;           // 筆刷 mask 低解像闊度
-    var brushCanvas = document.createElement("canvas");
-    var brushCtx = brushCanvas.getContext("2d", { willReadFrequently: true });
-    var brushMode = false;       // 筆刷模式開關
-    var painting = false;        // 拖動塗抹中
-    var brushParams = { temp: 0, bright: 0, sat: 0 };
+    /* ============ 滑桿 ============ */
 
     var sliders = {
       ai: $("aiStrength"), temp: $("temp"), tint: $("tint"),
@@ -529,7 +508,6 @@
       resultCanvas.width = pvW; resultCanvas.height = pvH;
       origCanvas.width = pvW; origCanvas.height = pvH;
       origCanvas.getContext("2d").drawImage(origPv, 0, 0);
-      brushSetup(pvW, pvH);   // v4: 筆刷 mask 低解像 canvas
     }
 
     /* ============ AI 推理 ============ */
@@ -682,6 +660,7 @@
         tint: parseInt(sliders.tint.value, 10) / 100,
         bright: parseInt(sliders.bright.value, 10) / 100,
         whiten: parseInt(sliders.whiten.value, 10) / 100,
+        smoothSkin: parseInt(($("smoothSkin")||{value:0}).value, 10) / 100,
         rawMode: rawMode,
         // v5 基本
         exposure: pv('p_exposure'), contrast: pv('p_contrast'),
@@ -778,6 +757,197 @@
       return out;
     }
 
+    /* ============ v6: 美顏算法（形態學清理＋美白＋磨皮） ============ */
+    function cleanSkinMask(mask, w, h) {
+      var n = w * h;
+      var x, y, i, dx, dy;
+      var eroded = new Uint8Array(n);
+      var opened = new Uint8Array(n);
+      var row, r2, xx, yy, ok, hit;
+      for (y = 0; y < h; y++) {
+        row = y * w;
+        for (x = 0; x < w; x++) {
+          if (mask[row + x] <= 0.5) { continue; }
+          ok = 1;
+          for (dy = -1; dy <= 1; dy++) {
+            yy = y + dy;
+            if (yy < 0 || yy >= h) { ok = 0; break; }
+            r2 = yy * w;
+            for (dx = -1; dx <= 1; dx++) {
+              xx = x + dx;
+              if (xx < 0 || xx >= w || mask[r2 + xx] <= 0.5) { ok = 0; break; }
+            }
+            if (!ok) { break; }
+          }
+          if (ok) { eroded[row + x] = 1; }
+        }
+      }
+      for (y = 0; y < h; y++) {
+        row = y * w;
+        for (x = 0; x < w; x++) {
+          hit = 0;
+          for (dy = -1; dy <= 1 && !hit; dy++) {
+            yy = y + dy;
+            if (yy < 0 || yy >= h) { continue; }
+            r2 = yy * w;
+            for (dx = -1; dx <= 1; dx++) {
+              xx = x + dx;
+              if (xx < 0 || xx >= w) { continue; }
+              if (eroded[r2 + xx]) { hit = 1; break; }
+            }
+          }
+          opened[row + x] = hit;
+        }
+      }
+      var parent = new Int32Array(n);
+      for (i = 0; i < n; i++) { parent[i] = opened[i] ? i : -1; }
+      function find(a) {
+        var r = a;
+        while (parent[r] !== r) { r = parent[r]; }
+        while (parent[a] !== r) { var t = parent[a]; parent[a] = r; a = t; }
+        return r;
+      }
+      for (y = 0; y < h; y++) {
+        row = y * w;
+        for (x = 0; x < w; x++) {
+          i = row + x;
+          if (!opened[i]) { continue; }
+          if (x > 0 && opened[i - 1]) {
+            var a = find(i), b = find(i - 1);
+            if (a !== b) { parent[a] = b; }
+          }
+          if (y > 0 && opened[i - w]) {
+            var c = find(i), d2 = find(i - w);
+            if (c !== d2) { parent[c] = d2; }
+          }
+        }
+      }
+      var size = new Int32Array(n);
+      for (i = 0; i < n; i++) {
+        if (!opened[i]) { continue; }
+        size[find(i)]++;
+      }
+      var minSize = Math.floor(n * 0.001);
+      var out = new Float32Array(n);
+      for (i = 0; i < n; i++) {
+        if (!opened[i]) { continue; }
+        if (size[find(i)] >= minSize) { out[i] = 1; }
+      }
+      return out;
+    }
+
+    function applyWhiten(imgData, skinMask, amount) {
+      var w = imgData.width, h = imgData.height, data = imgData.data;
+      var n = w * h;
+      var k = Math.max(0, Math.min(1, amount));
+      if (k <= 0) { return; }
+      var i, p;
+      for (i = 0; i < n; i++) {
+        var m = skinMask[i] * k;
+        if (m <= 0.001) { continue; }
+        p = i * 4;
+        var r = data[p], g = data[p + 1], b = data[p + 2];
+        var y  = 0.299 * r + 0.587 * g + 0.114 * b;
+        var cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+        var cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+        var yn = y / 255;
+        var y2 = y + (1 - yn) * yn * 0.55 * 255;
+        var cb2 = cb, cr2 = cr;
+        if (cb < 110) { cb2 = cb + (110 - cb) * 0.12; }
+        if (cr > 150) { cr2 = cr + (150 - cr) * 0.12; }
+        cr2 += 2.0;
+        cb2 -= 1.5;
+        var r2 = y2 + 1.402 * (cr2 - 128);
+        var g2 = y2 - 0.344136 * (cb2 - 128) - 0.714136 * (cr2 - 128);
+        var b2 = y2 + 1.772 * (cb2 - 128);
+        r2 = r2 <= 250 ? r2 : 255 - 5 / (1 + (r2 - 250) / 5);
+        g2 = g2 <= 250 ? g2 : 255 - 5 / (1 + (g2 - 250) / 5);
+        b2 = b2 <= 250 ? b2 : 255 - 5 / (1 + (b2 - 250) / 5);
+        data[p]     = r + (r2 - r) * m;
+        data[p + 1] = g + (g2 - g) * m;
+        data[p + 2] = b + (b2 - b) * m;
+      }
+    }
+
+    function applySmooth(imgData, skinMask, amount) {
+      var w = imgData.width, h = imgData.height, data = imgData.data;
+      var n = w * h;
+      var k = Math.max(0, Math.min(1, amount));
+      if (k <= 0) { return; }
+      var R = 3;
+      var sigS2 = 2 * 2 * 2;
+      var sigR2 = 2 * 25 * 25;
+      var ks = new Float32Array((2 * R + 1) * (2 * R + 1));
+      var dx, dy, t = 0;
+      for (dy = -R; dy <= R; dy++) {
+        for (dx = -R; dx <= R; dx++) {
+          ks[t++] = Math.exp(-(dx * dx + dy * dy) / sigS2);
+        }
+      }
+      var LUTN = 65026;
+      var lut = new Float32Array(LUTN);
+      var q;
+      for (q = 0; q < LUTN; q++) { lut[q] = Math.exp(-q / sigR2); }
+      var x, y, i, p;
+      var sx = new Float32Array(n * 3);
+      for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+          i = y * w + x;
+          if (skinMask[i] <= 0.05) { continue; }
+          p = i * 4;
+          var r0 = data[p], g0 = data[p + 1], b0 = data[p + 2];
+          var sr = 0, sg = 0, sb = 0, sw = 0, ki = 0;
+          for (dy = -R; dy <= R; dy++) {
+            var yy = y + dy;
+            if (yy < 0 || yy >= h) { ki += 2 * R + 1; continue; }
+            var yyw = yy * w;
+            for (dx = -R; dx <= R; dx++) {
+              var wsp = ks[ki++];
+              var xx = x + dx;
+              if (xx < 0 || xx >= w) { continue; }
+              q = (yyw + xx) * 4;
+              var dr = data[q] - r0;
+              var dg = data[q + 1] - g0;
+              var db = data[q + 2] - b0;
+              var d2 = (dr * dr + dg * dg + db * db) / 3;
+              if (d2 >= LUTN) { d2 = LUTN - 1; }
+              var wr = wsp * lut[d2 | 0];
+              sr += data[q] * wr;
+              sg += data[q + 1] * wr;
+              sb += data[q + 2] * wr;
+              sw += wr;
+            }
+          }
+          sx[i * 3] = sr / sw;
+          sx[i * 3 + 1] = sg / sw;
+          sx[i * 3 + 2] = sb / sw;
+        }
+      }
+      for (i = 0; i < n; i++) {
+        var m = skinMask[i] * k;
+        if (m <= 0.001) { continue; }
+        p = i * 4;
+        data[p]     = data[p]     + (sx[i * 3]     - data[p]) * m;
+        data[p + 1] = data[p + 1] + (sx[i * 3 + 1] - data[p + 1]) * m;
+        data[p + 2] = data[p + 2] + (sx[i * 3 + 2] - data[p + 2]) * m;
+      }
+    }
+
+    /* mask 重採樣（下載全解像用；preview 同 mask 同尺寸唔使） */
+    function resampleMask(mask, mw, mh, w, h) {
+      if (mw === w && mh === h) return mask;
+      var out = new Float32Array(w * h);
+      var x, y;
+      for (y = 0; y < h; y++) {
+        var my = Math.min(mh - 1, Math.round(y * mh / h));
+        for (x = 0; x < w; x++) {
+          var mx = Math.min(mw - 1, Math.round(x * mw / w));
+          out[y * w + x] = mask[my * mw + mx];
+        }
+      }
+      return out;
+    }
+
     // 喺 AI blend 後嘅預覽 ImageData 上做膚色檢測。
     // 回傳 {mask, mw, mh, k}；皮膚像素 <0.5% 就回傳 null（叫出面自動停用）。
     function computeSkin(base, w, h) {
@@ -796,6 +966,7 @@
         }
       }
       if (cnt < n * 0.005) return null;
+      mask = cleanSkinMask(mask, w, h); // v6: 形態學去散點＋碎塊（羽化前做）
       // 實測：用戶鍾意皮膚微暖，目標 R/G = 1.12（7 張目標平均）
       // skinRG < 1.12 → 加暖；> 1.12 → 輕微降
       var skinRG = sumR / Math.max(sumG, 1e-6);
@@ -836,66 +1007,6 @@
       return imgData;
     }
 
-    /* ============ v4: 手動筆刷 ============ */
-    function brushSetup(w, h) {
-      brushCanvas.width = BRUSH_W;
-      brushCanvas.height = Math.max(1, Math.round(BRUSH_W * h / w));
-      brushCtx.clearRect(0, 0, brushCanvas.width, brushCanvas.height);
-    }
-
-    // 筆刷 mask 有冇嘢（alpha 通道）
-    function brushHasPaint() {
-      var bw = brushCanvas.width, bh = brushCanvas.height;
-      if (!bw || !bh) return false;
-      var bd = brushCtx.getImageData(0, 0, bw, bh).data;
-      for (var i = 3; i < bd.length; i += 4) {
-        if (bd[i] > 2) return true;
-      }
-      return false;
-    }
-
-    // 筆刷區獨立調整：色溫（r/b 乘法）、亮度（gain）、飽和（luma 混合）
-    function applyBrush(imgData, bp) {
-      if (bp.temp === 0 && bp.bright === 0 && bp.sat === 0) return imgData;
-      if (!brushHasPaint()) return imgData;
-      var w = imgData.width, h = imgData.height, d = imgData.data;
-      var bw = brushCanvas.width, bh = brushCanvas.height;
-      var bd = brushCtx.getImageData(0, 0, bw, bh).data;
-      var n = bw * bh;
-      var mSmall = new Float32Array(n);
-      var i;
-      for (i = 0; i < n; i++) mSmall[i] = bd[i * 4 + 3] / 255;
-      mSmall = blurMask(mSmall, bw, bh);
-      mSmall = blurMask(mSmall, bw, bh);
-      var t = bp.temp / 100, br = bp.bright / 100, st = bp.sat / 100;
-      var mR = 1 + 0.35 * t, mB = 1 - 0.35 * t, gain = 1 + br, satK = 1 + st;
-      var x, y, mx, my, m, r, g, b, nr, ng, nb, luma;
-      for (y = 0; y < h; y++) {
-        my = Math.min(bh - 1, Math.round(y * bh / h));
-        for (x = 0; x < w; x++) {
-          mx = Math.min(bw - 1, Math.round(x * bw / w));
-          m = mSmall[my * bw + mx];
-          if (m <= 0) continue;
-          i = (y * w + x) * 4;
-          r = d[i]; g = d[i + 1]; b = d[i + 2];
-          nr = r * mR * gain; ng = g * gain; nb = b * mB * gain;
-          if (st !== 0) {
-            luma = 0.299 * nr + 0.587 * ng + 0.114 * nb;
-            nr = luma + (nr - luma) * satK;
-            ng = luma + (ng - luma) * satK;
-            nb = luma + (nb - luma) * satK;
-          }
-          nr = Math.min(255, Math.max(0, nr));
-          ng = Math.min(255, Math.max(0, ng));
-          nb = Math.min(255, Math.max(0, nb));
-          d[i] = r + (nr - r) * m;
-          d[i + 1] = g + (ng - g) * m;
-          d[i + 2] = b + (nb - b) * m;
-        }
-      }
-      return imgData;
-    }
-
     var scratchPv = document.createElement("canvas");
     function renderPreview() {
       if (!origImg && !rawMode) return;
@@ -906,17 +1017,18 @@
       var sctx = scratchPv.getContext("2d", { willReadFrequently: true });
       var base = blendData(origPv, aiPv, pvW, pvH, p.aiK, sctx);
       lastBasePv = new ImageData(new Uint8ClampedArray(base.data), pvW, pvH);
-      // v5 管線：皮膚分區 → 筆刷 → 基本 → 顏色 → 細節 → 效果
+      // v6 管線：皮膚分區（白平衡＋美白＋磨皮） → 基本 → 顏色 → 細節 → 效果
       if (skinOn && !skinAutoOff) {
         var skin = getSkin(base, pvW, pvH, p.aiK);
         if (skin) {
           applySkin(base, skin, parseInt($("skinStrength").value, 10) / 100);
+          if (p.whiten > 0) applyWhiten(base, skin.mask, p.whiten);
+          if (p.smoothSkin > 0) applySmooth(base, skin.mask, p.smoothSkin);
         } else {
           skinAutoOff = true;
           updateSkinUI();
         }
       }
-      applyBrush(base, brushParams);
       applyBasic(base, p);
       applyColor(base, p);
       applyDetail(base, p);
@@ -944,56 +1056,18 @@
     }
     stage.addEventListener("pointerdown", function (e) {
       if (sampling) { sampleAt(e); return; }
-      if (brushMode) {
-        painting = true;
-        try { stage.setPointerCapture(e.pointerId); } catch (err) {}
-        brushPaintAt(e);
-        return;
-      }
       dragging = true;
       try { stage.setPointerCapture(e.pointerId); } catch (err) {}
       comparePos = stagePos(e);
       updateCompare();
     });
     stage.addEventListener("pointermove", function (e) {
-      if (brushMode) { moveBrushCursor(e); if (painting) brushPaintAt(e); return; }
       if (!dragging || sampling) return;
       comparePos = stagePos(e);
       updateCompare();
     });
-    stage.addEventListener("pointerup", function () { dragging = false; painting = false; });
-    stage.addEventListener("pointercancel", function () { dragging = false; painting = false; });
-
-    /* ============ v4: 筆刷塗抹＋游標 ============ */
-    var brushCursor = $("brushCursor");
-    function brushPaintAt(e) {
-      var rect = stage.getBoundingClientRect();
-      var px = (e.clientX - rect.left) / rect.width * pvW;
-      var py = (e.clientY - rect.top) / rect.height * pvH;
-      var bw = brushCanvas.width, bh = brushCanvas.height;
-      var bx = px / pvW * bw, by = py / pvH * bh;
-      var size = parseInt($("brushSize").value, 10);
-      var br = size / pvW * bw;
-      var g = brushCtx.createRadialGradient(bx, by, 0, bx, by, br);
-      g.addColorStop(0, "rgba(255,255,255,1)");
-      g.addColorStop(0.7, "rgba(255,255,255,0.85)");
-      g.addColorStop(1, "rgba(255,255,255,0)");
-      brushCtx.fillStyle = g;
-      brushCtx.beginPath();
-      brushCtx.arc(bx, by, br, 0, Math.PI * 2);
-      brushCtx.fill();
-      requestRender();
-    }
-    function moveBrushCursor(e) {
-      var rect = stage.getBoundingClientRect();
-      var x = e.clientX - rect.left, y = e.clientY - rect.top;
-      var size = parseInt($("brushSize").value, 10);
-      var cssD = size / pvW * rect.width;
-      brushCursor.style.left = x + "px";
-      brushCursor.style.top = y + "px";
-      brushCursor.style.width = cssD + "px";
-      brushCursor.style.height = cssD + "px";
-    }
+    stage.addEventListener("pointerup", function () { dragging = false; });
+    stage.addEventListener("pointercancel", function () { dragging = false; });
 
     /* ============ 水滴白平衡 ============ */
     var wbBtn = $("wbBtn"), wbClearBtn = $("wbClearBtn"), wbSwatch = $("wbSwatch");
@@ -1061,9 +1135,8 @@
     bindSlider(sliders.bright, $("brightVal"), "");
     bindSlider(sliders.whiten, $("whitenVal"), "%");
 
-    /* ============ v4: 皮膚選區＋筆刷 UI ============ */
+    /* ============ v4: 皮膚選區 UI ============ */
     var skinBtn = $("skinBtn"), skinNote = $("skinNote");
-    var brushBtn = $("brushBtn"), brushClearBtn = $("brushClearBtn");
     function updateSkinUI() {
       skinBtn.textContent = "🤚 皮膚選區：" + (skinOn && !skinAutoOff ? "開" : "關");
       skinBtn.classList.toggle("active", skinOn && !skinAutoOff);
@@ -1080,54 +1153,22 @@
       requestRender();
     });
     bindSlider($("skinStrength"), $("skinStrengthVal"), "%");
+    bindSlider($("smoothSkin"), $("smoothSkinVal"), "%");
 
-    function setBrushMode(on) {
-      brushMode = on;
-      painting = false;
-      stage.classList.toggle("brushmode", on);
-      brushBtn.textContent = "🖌️ 筆刷模式：" + (on ? "開" : "關");
-      brushBtn.classList.toggle("active", on);
-    }
-    brushBtn.addEventListener("click", function () { setBrushMode(!brushMode); });
-    brushClearBtn.addEventListener("click", function () {
-      brushCtx.clearRect(0, 0, brushCanvas.width, brushCanvas.height);
-      requestRender();
-    });
-    bindSlider($("brushSize"), $("brushSizeVal"), "");
-    bindSlider($("brushTemp"), $("brushTempVal"), "");
-    bindSlider($("brushBright"), $("brushBrightVal"), "");
-    bindSlider($("brushSat"), $("brushSatVal"), "");
-    // 筆刷參數桿 → brushParams（-100..100 → -1..1）
-    $("brushTemp").addEventListener("input", function () {
-      brushParams.temp = parseInt($("brushTemp").value, 10) / 100;
-      requestRender();
-    });
-    $("brushBright").addEventListener("input", function () {
-      brushParams.bright = parseInt($("brushBright").value, 10) / 100;
-      requestRender();
-    });
-    $("brushSat").addEventListener("input", function () {
-      brushParams.sat = parseInt($("brushSat").value, 10) / 100;
-      requestRender();
-    });
 
     /* ============ 按鈕 ============ */
     $("resetBtn").addEventListener("click", function () {
       sliders.ai.value = 100; sliders.temp.value = 0; sliders.tint.value = 0;
       sliders.bright.value = 25; sliders.whiten.value = 0;
+      $("smoothSkin").value = 0;
       resetProSliders(); // v5: 重設專業面板
       wb = null; lastSampleRGB = null; updateWbUI();
       // v4: 重置選擇性調整
       skinOn = true; skinAutoOff = false; skinCache = null; updateSkinUI();
       $("skinStrength").value = 70;
-      setBrushMode(false);
-      brushCtx.clearRect(0, 0, brushCanvas.width, brushCanvas.height);
-      brushParams.temp = 0; brushParams.bright = 0; brushParams.sat = 0;
-      $("brushTemp").value = 0; $("brushBright").value = 0; $("brushSat").value = 0;
-      $("brushSize").value = 40;
       var ev = new Event("input");
       [sliders.ai, sliders.temp, sliders.tint, sliders.bright, sliders.whiten,
-       $("skinStrength"), $("brushTemp"), $("brushBright"), $("brushSat"), $("brushSize")]
+       $("skinStrength"), $("smoothSkin")]
         .forEach(function (s) { s.dispatchEvent(ev); });
       requestRender();
     });
@@ -1149,12 +1190,16 @@
             pp = {}; for (var kk in p) pp[kk] = p[kk]; pp.exposure = 0;
           }
           var imgData = blendData(origFull, aiFull, fullW, fullH, pp.aiK, octx);
-          // v5 管線：皮膚分區 → 筆刷 → 基本 → 顏色 → 細節 → 效果
+          // v6 管線：皮膚分區（白平衡＋美白＋磨皮） → 基本 → 顏色 → 細節 → 效果
           if (skinOn && !skinAutoOff) {
             var dSkin = getSkin(lastBasePv, pvW, pvH, pp.aiK);
-            if (dSkin) applySkin(imgData, dSkin, parseInt($("skinStrength").value, 10) / 100);
+            if (dSkin) {
+              applySkin(imgData, dSkin, parseInt($("skinStrength").value, 10) / 100);
+              var dMaskFull = resampleMask(dSkin.mask, dSkin.mw, dSkin.mh, fullW, fullH);
+              if (pp.whiten > 0) applyWhiten(imgData, dMaskFull, pp.whiten);
+              if (pp.smoothSkin > 0) applySmooth(imgData, dMaskFull, pp.smoothSkin);
+            }
           }
-          applyBrush(imgData, brushParams);
           applyBasic(imgData, pp);
           applyColor(imgData, pp);
           applyDetail(imgData, pp);
@@ -1208,7 +1253,7 @@
 
     /* ================================================================
        v5: 專業調整面板 ＋ RAW/TIFF 支援
-       管線：RAW解碼 → AI還原 → 皮膚分區 → 筆刷 → 基本 → 顏色 → 細節 → 效果 → 輸出
+       管線：RAW解碼 → AI還原 → 皮膚分區 → 基本 → 顏色 → 細節 → 效果 → 輸出
        ================================================================ */
 
     /* ---------- 數學小工具 ---------- */
@@ -1333,7 +1378,7 @@
         hc.push({ def: HSL_DEF[k], h: hsh, s: hss, l: hsl2 });
       }
       var wht = p.whiten;
-      if (mR === 1 && mG === 1 && mB === 1 && !vib && satK === 1 && !hslOn && !wht) return imgData;
+      if (mR === 1 && mG === 1 && mB === 1 && !vib && satK === 1 && !hslOn) return imgData;
       var d = imgData.data, i, r, g, b, avg, mx, mn, st, vb, j, wt, hsl, rgb;
       for (i = 0; i < d.length; i += 4) {
         r = d[i] / 255 * mR; g = d[i + 1] / 255 * mG; b = d[i + 2] / 255 * mB;
@@ -1360,9 +1405,7 @@
           ss = Math.min(1, Math.max(0, ss)); ll = Math.min(1, Math.max(0, ll));
           rgb = hsl2rgb(hh, ss, ll); r = rgb[0]; g = rgb[1]; b = rgb[2];
         }
-        if (wht > 0) {
-          if (r > g && g > b && r > 0.4) { var lift = 1 + 0.45 * wht; r *= lift; g *= lift; b *= lift; }
-        }
+        /* v6: 舊啟發式美白已移除，改用 applyWhiten（皮膚 mask 版，喺管線呼叫） */
         d[i]     = Math.min(255, Math.max(0, r * 255));
         d[i + 1] = Math.min(255, Math.max(0, g * 255));
         d[i + 2] = Math.min(255, Math.max(0, b * 255));
@@ -1601,22 +1644,76 @@
       origFull.getContext("2d").drawImage(rawFullCanvas, 0, 0);
       developRawPreview(ev);
     }
+    var RAW_WASM_PARTS = 13;
+    function b64ToU8(b64) {
+      var bin = atob(b64), n = bin.length, u8 = new Uint8Array(n);
+      for (var i = 0; i < n; i++) u8[i] = bin.charCodeAt(i);
+      return u8;
+    }
+    var rawWasmCache = null;
+    function fetchRawWasm() {
+      if (rawWasmCache) return Promise.resolve(rawWasmCache);
+      setStatus("busy", "載入 RAW 引擎…");
+      var jobs = [];
+      for (var i = 0; i < RAW_WASM_PARTS; i++) {
+        (function (idx) {
+          var name = "raw/wasm.part" + (idx < 10 ? "0" + idx : "" + idx);
+          jobs.push(fetch(name).then(function (r) {
+            if (!r.ok) throw new Error("下載 " + name + " 失敗（HTTP " + r.status + "）");
+            return r.text();
+          }).then(function (t) { return { i: idx, u8: b64ToU8(t.replace(/\s/g, "")) }; }));
+        })(i);
+      }
+      return Promise.all(jobs).then(function (parts) {
+        parts.sort(function (a, b) { return a.i - b.i; });
+        var total = 0, k;
+        for (k = 0; k < parts.length; k++) total += parts[k].u8.length;
+        var out = new Uint8Array(total), off = 0;
+        for (k = 0; k < parts.length; k++) { out.set(parts[k].u8, off); off += parts[k].u8.length; }
+        rawWasmCache = out;
+        return out;
+      });
+    }
+    var libRawModulePromise = null;
+    function getLibRawModule() {
+      if (libRawModulePromise) return libRawModulePromise;
+      libRawModulePromise = Promise.all([
+        import("libraw-wasm"),
+        fetchRawWasm()
+      ]).then(function (res) {
+        var LibRawMod = res[0], wasmBinary = res[1];
+        var factory = LibRawMod.default || LibRawMod;
+        return factory({ wasmBinary: wasmBinary });
+      });
+      return libRawModulePromise;
+    }
     function decodeRAW(file) {
       setStatus("busy", "RAW 解碼緊（16-bit）…");
       clearError();
       var done = function () {};
       var work = (async function () {
-        /* v5.1: libraw-wasm@1.1.0 係單線程版，唔需要 crossOriginIsolated */
-        var LibRawMod = await import("libraw-wasm");
-        var LibRaw = LibRawMod.default || LibRawMod;
-        var buf = new Uint8Array(await file.arrayBuffer());
-        var raw = new LibRaw();
-        var half = file.size > 24 * 1024 * 1024; // 特大 RAW 降半解像，防手機爆記憶體
-        var opened = raw.open(buf, { outputBps: 16, useCameraWb: true, outputColor: 1, halfSize: half, userQual: 3 });
-        var timeout = new Promise(function (_, rej) {
-          setTimeout(function () { rej(new Error("RAW 引擎載入超時（可能唔支援此裝置），請轉 TIFF/JPG。")); }, 60000);
+        /* v6: 主線程 Emscripten，WASM 由本站同源載入經 wasmBinary 注入。
+           唔經 cross-origin worker，唔會靜默 hang。主線程解碼時 UI 會短暫停頓，屬正常。 */
+        var timeoutMs = 90000;
+        var timer = null;
+        var loadTimedOut = false;
+        var loadTimer = new Promise(function (_, rej) {
+          timer = setTimeout(function () { loadTimedOut = true; rej(new Error("RAW 引擎載入超時（90秒），請轉 TIFF/JPG。")); }, timeoutMs);
         });
-        await Promise.race([opened, timeout]);
+        var em;
+        try {
+          em = await Promise.race([getLibRawModule(), loadTimer]);
+        } finally { clearTimeout(timer); }
+        var buf = new Uint8Array(await file.arrayBuffer());
+        var raw = new em.LibRaw();
+        var half = file.size > 24 * 1024 * 1024; // 特大 RAW 降半解像，防手機爆記憶體
+        // Emscripten binding 係同步：直接跑；先讓 UI 有機會更新狀態
+        await new Promise(function (res) { setTimeout(res, 30); });
+        try {
+          raw.open(buf, { outputBps: 16, useCameraWb: true, outputColor: 1, halfSize: half, userQual: 3 });
+        } catch (e) {
+          throw new Error("RAW 解碼失敗：" + (e && e.message ? e.message : e));
+        }
         var meta = null;
         try { meta = await raw.metadata(); } catch (e) {}
         var img = await raw.imageData();
@@ -1689,12 +1786,7 @@
       skinCache = null; skinCacheKey = "";
       skinOn = true; skinAutoOff = false; updateSkinUI();
       $("skinStrength").value = 70; $("skinStrengthVal").textContent = "70%";
-      setBrushMode(false);
-      brushParams.temp = 0; brushParams.bright = 0; brushParams.sat = 0;
-      $("brushTemp").value = 0; $("brushTempVal").textContent = "0";
-      $("brushBright").value = 0; $("brushBrightVal").textContent = "0";
-      $("brushSat").value = 0; $("brushSatVal").textContent = "0";
-      $("brushSize").value = 40; $("brushSizeVal").textContent = "40";
+      $("smoothSkin").value = 0; $("smoothSkinVal").textContent = "0%";
       setSampling(false);
       dropzone.classList.add("hidden");
       stage.classList.remove("hidden");
