@@ -283,6 +283,11 @@
           <input type="range" id="aiStrength" min="0" max="100" step="1" value="100" />
           <span class="val" id="aiStrengthVal">100%</span>
         </div>
+        <div class="btnrow">
+          <button class="btn" id="aiReoptBtn" type="button">🤖 AI 重新優化</button>
+          <button class="btn" id="aiAutoBtn" type="button">✨ AI 自動微調</button>
+        </div>
+        <div class="note">AI 重新優化：喺而家嘅效果上再跑一次 AI（調和顏色）。AI 自動微調：分析相片，自動設定一組參數。</div>
 
         <h2>手動微調</h2>
         <div class="btnrow">
@@ -322,6 +327,7 @@
             <div class="sel-sub">🤚 皮膚選區白平衡</div>
             <div class="btnrow">
               <button class="btn" id="skinBtn" type="button">🤚 皮膚選區：開</button>
+              <button class="btn" id="skinMaskBtn" type="button">👁️ 睇皮膚範圍</button>
             </div>
             <div class="row">
               <label for="skinStrength">皮膚強度</label>
@@ -334,7 +340,7 @@
               <span class="val" id="smoothSkinVal">0%</span>
             </div>
             <div class="note">磨皮只喺皮膚區做邊緣保留平滑，去皺紋豆豆唔糊五官。美白喺「手動微調」。</div>
-            <div class="note" id="skinNote">自動偵測膚色（YCbCr），只將皮膚區拉向中性，藍色背景唔郁。如果偵測到皮膚少過 0.5%，會自動停用。</div>
+            <div class="note" id="skinNote">自動偵測膚色（YCbCr），只將皮膚區拉向中性，藍色背景唔郁。如果偵測到皮膚少過 0.1%，會自動停用。</div>
 
           </div>
         </details>
@@ -405,6 +411,7 @@
     /* ============ v4: 皮膚選區狀態 ============ */
     var skinOn = true;           // 皮膚選區開關
     var skinAutoOff = false;     // 皮膚 <0.5% 時自動停用
+    var skinMaskView = false;    // v7: 皮膚 mask debug 顯示
     var skinCache = null;        // {mask, mw, mh, k}，預覽解像度快取
     var skinCacheKey = "";
 
@@ -511,6 +518,60 @@
     }
 
     /* ============ AI 推理 ============ */
+    /* v7: AI 重新優化 — 將目前預覽輸出作為新輸入，再跑一次 AI 調和 */
+    function aiReoptimize() {
+      if (!session) { showError("AI 模型未載入，唔可以重新優化。"); return; }
+      var c = document.createElement("canvas");
+      c.width = pvW; c.height = pvH;
+      // 用最後一次 render 嘅結果（resultCanvas）
+      var src = (typeof resultCanvas !== "undefined") ? resultCanvas : null;
+      if (!src || !src.width) { showError("未有相片。"); return; }
+      c.getContext("2d").drawImage(src, 0, 0, pvW, pvH);
+      // 設為新 orig（preview 同 full）
+      origPv.getContext("2d").drawImage(c, 0, 0);
+      if (origFull) {
+        var fc = document.createElement("canvas");
+        fc.width = fullW; fc.height = fullH;
+        fc.getContext("2d").drawImage(c, 0, 0, fullW, fullH);
+        origFull.getContext("2d").drawImage(fc, 0, 0);
+      }
+      // 清除快取，重新跑 AI
+      aiPv = null; aiFull = null; skinCache = null; skinCacheKey = "";
+      photoSeq++;
+      // 重設部分桿（保留用戶微調，只重置 AI 相關）
+      setStatus("busy", "AI 重新優化緊…");
+      runAI();
+    }
+    /* v7: AI 自動微調 — 分析相片統計，自動設定一組參數 */
+    function aiAutoTune() {
+      var base = lastBasePv || (origPv ? origPv.getContext("2d").getImageData(0,0,pvW,pvH) : null);
+      if (!base) { showError("未有相片。"); return; }
+      var d = base.data, n = pvW * pvH, i;
+      var sR=0, sG=0, sB=0, sY=0;
+      for (i = 0; i < n; i++) {
+        sR += d[i*4]; sG += d[i*4+1]; sB += d[i*4+2];
+      }
+      sR/=n; sG/=n; sB/=n;
+      var rg = sR/Math.max(sG,1), bg = sB/Math.max(sG,1);
+      var bright = (0.299*sR+0.587*sG+0.114*sB)/255;
+      // 目標：R/G→0.85, B/G→1.05, 亮度→0.62
+      var tempV = Math.round(Math.max(-100, Math.min(100, (0.85-rg)*120)));
+      var brightV = Math.round(Math.max(-50, Math.min(50, (0.62-bright)*100)));
+      var satV = rg < 0.5 ? 15 : 0; // 好藍就加少少飽和
+      setSlider("temp", tempV);
+      setSlider("bright", brightV);
+      setSlider("saturation", satV);
+      setSlider("aiStrength", 100);
+      requestRender();
+      setStatus("ok", "AI 自動微調完成（色溫 "+tempV+"、亮度 "+brightV+"）");
+    }
+    function setSlider(id, v) {
+      var el = $(id), val = $(id+"Val");
+      if (!el) return;
+      el.value = v;
+      if (val) val.textContent = (el.getAttribute("data-suffix")||"") ? v+(el.getAttribute("data-suffix")) : v;
+      el.dispatchEvent(new Event("input", {bubbles:true}));
+    }
     function runAI() {
       if (!session || (!origImg && !rawMode)) return;
       setStatus("busy", "AI 還原緊…");
@@ -669,6 +730,10 @@
         // v5 顏色
         vibrance: pv('p_vibrance'), saturation: pv('p_saturation'),
         hsl_r_h: pv('hsl_r_h'), hsl_r_s: pv('hsl_r_s'), hsl_r_l: pv('hsl_r_l'),
+        hsl_g_h: pv('hsl_g_h'), hsl_g_s: pv('hsl_g_s'), hsl_g_l: pv('hsl_g_l'),
+        hsl_c_h: pv('hsl_c_h'), hsl_c_s: pv('hsl_c_s'), hsl_c_l: pv('hsl_c_l'),
+        hsl_p_h: pv('hsl_p_h'), hsl_p_s: pv('hsl_p_s'), hsl_p_l: pv('hsl_p_l'),
+        hsl_m_h: pv('hsl_m_h'), hsl_m_s: pv('hsl_m_s'), hsl_m_l: pv('hsl_m_l'),
         hsl_o_h: pv('hsl_o_h'), hsl_o_s: pv('hsl_o_s'), hsl_o_l: pv('hsl_o_l'),
         hsl_y_h: pv('hsl_y_h'), hsl_y_s: pv('hsl_y_s'), hsl_y_l: pv('hsl_y_l'),
         hsl_b_h: pv('hsl_b_h'), hsl_b_s: pv('hsl_b_s'), hsl_b_l: pv('hsl_b_l'),
@@ -965,7 +1030,7 @@
           sumR += r; sumG += g; cnt++;
         }
       }
-      if (cnt < n * 0.005) return null;
+      if (cnt < n * 0.001) return null; // v7: 0.5%→0.1%，水下皮膚難檢測，唔好咁易關
       mask = cleanSkinMask(mask, w, h); // v6: 形態學去散點＋碎塊（羽化前做）
       // 實測：用戶鍾意皮膚微暖，目標 R/G = 1.12（7 張目標平均）
       // skinRG < 1.12 → 加暖；> 1.12 → 輕微降
@@ -973,7 +1038,7 @@
       var skinK = clamp(1.12 / skinRG, 0.85, 1.5);
       mask = blurMask(mask, w, h);
       mask = blurMask(mask, w, h);
-      return { mask: mask, mw: w, mh: h, k: skinK };
+      return { mask: mask, mw: w, mh: h, k: skinK, pct: cnt / n * 100 }; // v7: 回傳檢測%
     }
 
     // 取皮膚 mask（快取；base 變咗先重計）
@@ -985,6 +1050,19 @@
       return skinCache;
     }
 
+    var lastSkinPct = 0;
+    // v7: 將皮膚 mask 疊加顯示（紅色半透明），等用戶睇到檢測到邊度
+    function overlaySkinMask(imgData, mask) {
+      var d = imgData.data, n = imgData.width * imgData.height, i, p;
+      for (i = 0; i < n; i++) {
+        if (mask[i] > 0.3) {
+          p = i * 4;
+          d[p] = d[p] * 0.5 + 255 * 0.5;
+          d[p+1] = d[p+1] * 0.5;
+          d[p+2] = d[p+2] * 0.5;
+        }
+      }
+    }
     // 皮膚區 R 通道乘 skinK（只郁 R，唔郁 G/B）；strength 0..1
     function applySkin(imgData, skin, strength) {
       if (!skin || strength <= 0) return imgData;
@@ -1024,6 +1102,8 @@
           applySkin(base, skin, parseInt($("skinStrength").value, 10) / 100);
           if (p.whiten > 0) applyWhiten(base, skin.mask, p.whiten);
           if (p.smoothSkin > 0) applySmooth(base, skin.mask, p.smoothSkin);
+          if (skinMaskView) overlaySkinMask(base, skin.mask);
+          lastSkinPct = skin.pct;
         } else {
           skinAutoOff = true;
           updateSkinUI();
@@ -1141,9 +1221,9 @@
       skinBtn.textContent = "🤚 皮膚選區：" + (skinOn && !skinAutoOff ? "開" : "關");
       skinBtn.classList.toggle("active", skinOn && !skinAutoOff);
       if (skinAutoOff) {
-        skinNote.textContent = "⚠️ 偵測唔到足夠皮膚（少過 0.5%），皮膚選區已自動停用。";
+        skinNote.textContent = "⚠️ 偵測唔到足夠皮膚（少過 0.1%），皮膚選區已自動停用。";
       } else {
-        skinNote.textContent = "自動偵測膚色（YCbCr），只將皮膚區拉向中性，藍色背景唔郁。如果偵測到皮膚少過 0.5%，會自動停用。";
+        skinNote.textContent = "自動偵測膚色（YCbCr），只將皮膚區拉向中性，藍色背景唔郁。如果偵測到皮膚少過 0.1%，會自動停用。";
       }
     }
     skinBtn.addEventListener("click", function () {
@@ -1152,7 +1232,17 @@
       updateSkinUI();
       requestRender();
     });
+    var skinMaskBtn = $("skinMaskBtn");
+    skinMaskBtn.addEventListener("click", function () {
+      skinMaskView = !skinMaskView;
+      skinMaskBtn.textContent = skinMaskView ? "👁️ 閂皮膚範圍" : "👁️ 睇皮膚範圍";
+      skinMaskBtn.classList.toggle("active", skinMaskView);
+      requestRender();
+    });
     bindSlider($("skinStrength"), $("skinStrengthVal"), "%");
+    var aiReoptBtn = $("aiReoptBtn"), aiAutoBtn = $("aiAutoBtn");
+    if (aiReoptBtn) aiReoptBtn.addEventListener("click", aiReoptimize);
+    if (aiAutoBtn) aiAutoBtn.addEventListener("click", aiAutoTune);
     bindSlider($("smoothSkin"), $("smoothSkinVal"), "%");
 
 
@@ -1359,18 +1449,22 @@
 
     /* ---------- v5 顏色：白平衡/色溫/色調/自然飽和/飽和/HSL/美白 ---------- */
     var HSL_DEF = [
-      { c: 0,   hw: 17, id: "r" },
-      { c: 30,  hw: 17, id: "o" },
-      { c: 60,  hw: 17, id: "y" },
-      { c: 222, hw: 26, id: "b" }
-    ];
+      { c: 0,   hw: 40, id: "r" },
+      { c: 30,  hw: 40, id: "o" },
+      { c: 60,  hw: 40, id: "y" },
+      { c: 120, hw: 40, id: "g" },
+      { c: 180, hw: 40, id: "c" },
+      { c: 222, hw: 40, id: "b" },
+      { c: 270, hw: 40, id: "p" },
+      { c: 300, hw: 40, id: "m" }
+    ]; // v7: 8色，hw 加闊保證無死區，相鄰色重疊羽化
     function applyColor(imgData, p) {
       var mR = (wb ? wb.r : 1) * (1 + 0.35 * p.temp);
       var mG = (wb ? wb.g : 1) * (1 - 0.30 * p.tint);
       var mB = (wb ? wb.b : 1) * (1 - 0.35 * p.temp);
       var vib = p.vibrance / 100, satK = 1 + (p.saturation / 100) * 0.9;
       var hslOn = false, hc = [], k;
-      for (k = 0; k < 4; k++) {
+      for (k = 0; k < HSL_DEF.length; k++) {
         var hsh = p["hsl_" + HSL_DEF[k].id + "_h"];
         var hss = p["hsl_" + HSL_DEF[k].id + "_s"] / 100;
         var hsl2 = p["hsl_" + HSL_DEF[k].id + "_l"] / 100;
@@ -1394,7 +1488,7 @@
         if (hslOn) {
           hsl = rgb2hsl(Math.min(1, Math.max(0, r)), Math.min(1, Math.max(0, g)), Math.min(1, Math.max(0, b)));
           var hh = hsl[0], ss = hsl[1], ll = hsl[2];
-          for (j = 0; j < 4; j++) {
+          for (j = 0; j < HSL_DEF.length; j++) {
             wt = 1 - sstep(hc[j].def.hw * 0.55, hc[j].def.hw, angDist(hh, hc[j].def.c));
             if (wt > 0) {
               hh += hc[j].h * wt;
@@ -1513,9 +1607,21 @@
         { id: "hsl_y_h", label: "黃・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
         { id: "hsl_y_s", label: "黃・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
         { id: "hsl_y_l", label: "黃・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_g_h", label: "綠・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
+        { id: "hsl_g_s", label: "綠・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_g_l", label: "綠・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_c_h", label: "青・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
+        { id: "hsl_c_s", label: "青・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_c_l", label: "青・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
         { id: "hsl_b_h", label: "藍・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
         { id: "hsl_b_s", label: "藍・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
-        { id: "hsl_b_l", label: "藍・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" }
+        { id: "hsl_b_l", label: "藍・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_p_h", label: "紫・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
+        { id: "hsl_p_s", label: "紫・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_p_l", label: "紫・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_m_h", label: "品紅・色相", min: -30, max: 30, step: 1, def: 0, suffix: "" },
+        { id: "hsl_m_s", label: "品紅・飽和度", min: -100, max: 100, step: 1, def: 0, suffix: "" },
+        { id: "hsl_m_l", label: "品紅・明度", min: -100, max: 100, step: 1, def: 0, suffix: "" }
       ]},
       { title: "🔍 細節", open: false, reset: "細節", rows: [
         { id: "p_texture", label: "紋理", min: -100, max: 100, step: 1, def: 0, suffix: "" },
@@ -1670,6 +1776,10 @@
         for (k = 0; k < parts.length; k++) total += parts[k].u8.length;
         var out = new Uint8Array(total), off = 0;
         for (k = 0; k < parts.length; k++) { out.set(parts[k].u8, off); off += parts[k].u8.length; }
+        // v7: 驗證 WASM magic，唔啱即刻報錯唔好俾 Emscripten 食
+        if (!(out[0]===0x00 && out[1]===0x61 && out[2]===0x73 && out[3]===0x6d)) {
+          throw new Error("RAW 引擎檔案損壞（magic 唔啱，長度 "+total+"）。請重新載入頁面。");
+        }
         rawWasmCache = out;
         return out;
       });
