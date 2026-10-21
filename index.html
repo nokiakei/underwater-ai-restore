@@ -260,6 +260,7 @@
         </svg>
         <div class="big">撳呢度揀相，或者拖張相入嚟</div>
         <div class="small">亦可以喺剪貼簿<b>貼上</b>（Ctrl / ⌘ + V）<br />支援 JPG、PNG、WebP、<b>相機 RAW</b>（CR2/NEF/ARW/DNG…，16-bit 解碼）、TIFF；AI 會自動還原，再俾你手動微調。</div>
+        <label onclick="event.stopPropagation()" style="display:flex;gap:8px;align-items:center;justify-content:center;margin-top:12px;font-size:13px;color:var(--ink-dim);cursor:pointer"><input type="checkbox" id="rawFullToggle" style="width:17px;height:17px" /> RAW 全尺寸解碼（較慢、較食記憶體；唔勾 = 半尺寸，快好多，修圖夠用）</label>
       </div>
       <input type="file" id="fileInput" accept="image/*,.cr2,.cr3,.nef,.nrw,.arw,.srf,.sr2,.dng,.orf,.rw2,.raf,.pef,.srw,.rwl,.3fr,.fff,.iiq,.x3f,.mrw,.crw,.erf,.kdc,.dcr,.mos,.tif,.tiff" class="hidden" />
 
@@ -352,7 +353,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.1 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.2 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -1843,7 +1844,9 @@
             buf = new Uint8Array(await file.arrayBuffer());
             step = "建立解碼器";
             raw = new LibRaw();
-            half = file.size > 24 * 1024 * 1024;
+            // v10.2: 預設 halfSize（WebKit 實測 1 秒 vs 全尺寸 6.1 秒，慳 4 倍記憶體，真機更穩）；勾咗「全尺寸」先全解
+            var fullToggle = $("rawFullToggle");
+            half = !(fullToggle && fullToggle.checked);
             await new Promise(function (res) { setTimeout(res, 30); });
             step = "WASM 解碼";
             try {
