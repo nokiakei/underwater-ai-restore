@@ -284,10 +284,10 @@
           <span class="val" id="aiStrengthVal">100%</span>
         </div>
         <div class="btnrow">
-          <button class="btn" id="aiReoptBtn" type="button">🤖 AI 重新優化</button>
+          <button class="btn" id="aiReoptBtn" type="button">🤖 用 AI 重新還原（由原圖）</button>
           <button class="btn" id="aiAutoBtn" type="button">✨ AI 自動微調</button>
         </div>
-        <div class="note">AI 重新優化：喺而家嘅效果上再跑一次 AI（調和顏色）。AI 自動微調：分析相片，自動設定一組參數。</div>
+        <div class="note">AI 重新還原：返去原圖重新跑一次 AI，撳幾多次結果都一樣，唔會疊加、唔會越跑越過火。AI 自動微調：分析相片，自動設定一組參數。</div>
 
         <h2>手動微調</h2>
         <div class="btnrow">
@@ -353,7 +353,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.2 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.3 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -518,28 +518,18 @@
     }
 
     /* ============ AI 推理 ============ */
-    /* v7: AI 重新優化 — 將目前預覽輸出作為新輸入，再跑一次 AI 調和 */
+    /* v10.3: AI 重新還原 — 永遠以「原圖」做輸入由頭跑一次（冪等，唔疊加）。
+       v7 舊版會攞已還原嘅 resultCanvas 覆寫 origPv/origFull 再跑 AI，
+       撳幾次疊幾次，而且連對比拉桿嘅「原圖」都俾佢洗埋。已改晒。 */
     function aiReoptimize() {
-      if (!session) { showError("AI 模型未載入，唔可以重新優化。"); return; }
-      var c = document.createElement("canvas");
-      c.width = pvW; c.height = pvH;
-      // 用最後一次 render 嘅結果（resultCanvas）
-      var src = (typeof resultCanvas !== "undefined") ? resultCanvas : null;
-      if (!src || !src.width) { showError("未有相片。"); return; }
-      c.getContext("2d").drawImage(src, 0, 0, pvW, pvH);
-      // 設為新 orig（preview 同 full）
-      origPv.getContext("2d").drawImage(c, 0, 0);
-      if (origFull) {
-        var fc = document.createElement("canvas");
-        fc.width = fullW; fc.height = fullH;
-        fc.getContext("2d").drawImage(c, 0, 0, fullW, fullH);
-        origFull.getContext("2d").drawImage(fc, 0, 0);
-      }
-      // 清除快取，重新跑 AI
+      if (!session) { showError("AI 模型未載入，唔可以重新還原。"); return; }
+      if (!origImg && !rawMode) { showError("未有相片。"); return; }
+      // 只清 AI 快取；原圖數據（imgSrc / rawFullCanvas / origPv / origFull）一律唔郁。
+      // doRunAI 本身就係攞 imgSrc（JPG 原圖）／rawFullCanvas（RAW 解碼原圖）做輸入，
+      // 所以撳幾多次，輸入都係同一張原圖，結果同第一次一樣。
       aiPv = null; aiFull = null; skinCache = null; skinCacheKey = "";
       photoSeq++;
-      // 重設部分桿（保留用戶微調，只重置 AI 相關）
-      setStatus("busy", "AI 重新優化緊…");
+      setStatus("busy", "AI 重新還原緊（由原圖）…");
       runAI();
     }
     /* v7: AI 自動微調 — 分析相片統計，自動設定一組參數 */
@@ -1742,6 +1732,11 @@
     function developRawPreview(ev) {
       var img = developRawSampled(ev, pvW, pvH);
       origPv.getContext("2d").putImageData(img, 0, 0);
+      // v10.3 修復：同步對比舞台嘅 origCanvas。之前 RAW 路徑冇人畫 origCanvas，
+      // 佢一直全透明，拉桿左邊「原圖」其實係透過去睇下面嘅還原圖，兩邊睇落一樣。
+      if (origCanvas.width === pvW && origCanvas.height === pvH) {
+        origCanvas.getContext("2d").drawImage(origPv, 0, 0);
+      }
     }
     function developRawFull(ev) {
       var img = developRawSampled(ev, fullW, fullH);
