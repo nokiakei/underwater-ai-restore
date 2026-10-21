@@ -5,23 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
     <link rel="icon" href="data:," />
-    <title>水下 AI 還原 Shallow-UWnet v9</title>
+    <title>水下 AI 還原 Shallow-UWnet</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" crossorigin="anonymous" />
     <script>
-/* v5.1: 轉用 libraw-wasm@1.1.0（單線程版，唔需要 SharedArrayBuffer / 跨域隔離）。
-   之前 1.6.0 係 pthreads build，要 COOP/COEP header，GitHub Pages 俾唔到，
-   coi-serviceworker workaround 喺手機唔可靠。1.1.0 解碼慢啲，但咩環境都 work。 */
+/* v10: RAW 引擎升級 libraw-wasm@1.6.0（本站 raw16/ 同源 module worker）。
+   舊版引擎喺 iOS WebKit 解碼必死「The index is not in the allowed range」；
+   1.6.0 經 Playwright WebKit（模擬 iOS）實測：35.9MB ARW 全尺寸真 16-bit 解碼成功（6.1 秒）。
+   wasm（1.42MB）切 20 塊 base64（raw16/wpartXX），喺 worker 內拼合經 wasmBinary 注入。 */
 </script>
 <script type="importmap">
 {"imports":{
-  "libraw-wasm":"https://cdn.jsdelivr.net/npm/libraw-wasm@1.1.0/libraw.js",
-  "libraw-wasm-dist":"https://cdn.jsdelivr.net/npm/libraw-wasm@1.1.0/dist/index.js"
+  "libraw-wasm":"./raw16/index.js"
 }}
 </script>
-<!-- v6: RAW 改用主線程 Emscripten + 同源 WASM（唔經 cross-origin worker，唔會靜默超時）。
-     libraw.js 由 CDN 載入（104KB），libraw.wasm 由本站 raw/wasm.partXX 拼合經 wasmBinary 注入。 -->
+<!-- v10: RAW 引擎檔喺 raw16/（index.js + worker.js + wpart00–19），全部同源。 -->
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js" crossorigin="anonymous"></script>
     <style>
       :root {
@@ -260,7 +259,7 @@
           <path d="M12 2v3M10 3.5L12 1.5 14 3.5"></path>
         </svg>
         <div class="big">撳呢度揀相，或者拖張相入嚟</div>
-        <div class="small">亦可以喺剪貼簿<b>貼上</b>（Ctrl / ⌘ + V）<br />支援 JPG、PNG、WebP、<b>相機 RAW</b>（CR2/NEF/ARW/DNG…，自動讀取相機內嵌預覽，即開即修）、TIFF；AI 會自動還原，再俾你手動微調。</div>
+        <div class="small">亦可以喺剪貼簿<b>貼上</b>（Ctrl / ⌘ + V）<br />支援 JPG、PNG、WebP、<b>相機 RAW</b>（CR2/NEF/ARW/DNG…，16-bit 解碼）、TIFF；AI 會自動還原，再俾你手動微調。</div>
       </div>
       <input type="file" id="fileInput" accept="image/*,.cr2,.cr3,.nef,.nrw,.arw,.srf,.sr2,.dng,.orf,.rw2,.raf,.pef,.srw,.rwl,.3fr,.fff,.iiq,.x3f,.mrw,.crw,.erf,.kdc,.dcr,.mos,.tif,.tiff" class="hidden" />
 
@@ -353,7 +352,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本：v9（RAW 直接讀取內嵌預覽圖）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -1715,12 +1714,8 @@
         badge.innerHTML = "📷 RAW 解碼（" + via + "）" +
           (rawMeta && rawMeta.model ? " · " + rawMeta.model : "") +
           " · " + rawStore.w + "×" + rawStore.h + "（" + mp + "MP）" + note +
-          "<br><small>曝光桿會由線性數據重新開發。</small>" +
-          (via !== "16-bit RAW" && typeof lastRawFile !== "undefined" && lastRawFile ?
-            "<br><button class=\"btn\" id=\"raw16Btn\" type=\"button\" style=\"margin-top:6px\">🔬 試 16-bit 全解碼（實驗）</button>" : "");
+          "<br><small>曝光桿會由線性數據重新開發。</small>";
         badge.classList.remove("hidden");
-        var b16 = $("raw16Btn");
-        if (b16) b16.onclick = function () { tryWasm16(); };
       } else { badge.classList.add("hidden"); badge.innerHTML = ""; }
     }
     // 由 16-bit Float32 開發做 ImageData（dw×dh），ev = 曝光 EV
@@ -1755,308 +1750,160 @@
       origFull.width = fullW; origFull.height = fullH;
       origFull.getContext("2d").drawImage(rawFullCanvas, 0, 0);
       developRawPreview(ev);
-      origCanvas.getContext("2d").drawImage(origPv, 0, 0);
     }
-    var RAW_WASM_PARTS = 13;
-    function b64ToU8(b64) {
-      var bin = atob(b64), n = bin.length, u8 = new Uint8Array(n);
-      for (var i = 0; i < n; i++) u8[i] = bin.charCodeAt(i);
-      return u8;
-    }
-    var rawWasmCache = null;
-    function fetchRawWasm() {
-      if (rawWasmCache) return Promise.resolve(rawWasmCache);
-      setStatus("busy", "載入 RAW 引擎…");
-      var jobs = [];
-      for (var i = 0; i < RAW_WASM_PARTS; i++) {
-        (function (idx) {
-          var name = "raw/wasm.part" + (idx < 10 ? "0" + idx : "" + idx);
-          jobs.push(fetch(name).then(function (r) {
-            if (!r.ok) throw new Error("下載 " + name + " 失敗（HTTP " + r.status + "）");
-            return r.text();
-          }).then(function (t) { return { i: idx, u8: b64ToU8(t.replace(/\s/g, "")) }; }));
-        })(i);
-      }
-      return Promise.all(jobs).then(function (parts) {
-        parts.sort(function (a, b) { return a.i - b.i; });
-        var total = 0, k;
-        for (k = 0; k < parts.length; k++) total += parts[k].u8.length;
-        var out = new Uint8Array(total), off = 0;
-        for (k = 0; k < parts.length; k++) { out.set(parts[k].u8, off); off += parts[k].u8.length; }
-        // v7: 驗證 WASM magic，唔啱即刻報錯唔好俾 Emscripten 食
-        if (!(out[0]===0x00 && out[1]===0x61 && out[2]===0x73 && out[3]===0x6d)) {
-          throw new Error("RAW 引擎檔案損壞（magic 唔啱，長度 "+total+"）。請重新載入頁面。");
-        }
-        rawWasmCache = out;
-        return out;
-      });
-    }
-    var libRawModulePromise = null;
-    function getLibRawModule() {
-      if (libRawModulePromise) return libRawModulePromise;
-      libRawModulePromise = Promise.all([
-        import("libraw-wasm"),
-        fetchRawWasm()
-      ]).then(function (res) {
-        var LibRawMod = res[0], wasmBinary = res[1];
-        var factory = LibRawMod.default || LibRawMod;
-        return factory({ wasmBinary: wasmBinary });
-      });
-      return libRawModulePromise;
-    }
-    /* v9: RAW 直接讀取內嵌預覽（唔再等 WASM 行先）。
-       做法：行晒 TIFF IFD chain + SubIFD + EXIF IFD 搵 JPEGInterchangeFormat，
-       再全檔掃描 JPEG stream 補漏（RAF/CR3 等非 TIFF 封裝靠掃描；CR3 視乎封裝，唔保證）。
-       逐個候選用 marker-walk 解析真實尺寸，揀最大嗰張行先，解唔到自動試下一張。
-       WASM 16-bit 改做可選實驗掣（見 badge），唔再阻住開相。 */
-    function parseJpegStream(u8, start) {
-      var len = u8.length, p = start + 2, w = 0, h = 0, guard = 0;
-      if (u8[start] !== 0xFF || u8[start + 1] !== 0xD8) return null;
-      while (p < len - 1 && guard++ < 8192) {
-        if (u8[p] !== 0xFF) return null;
-        var m = u8[p + 1];
-        while (m === 0xFF && p + 2 < len) { p++; m = u8[p + 1]; }
-        if (m === 0xD9) return { end: p + 2, w: w, h: h };
-        if (m === 0xD8 || m === 0x01 || (m >= 0xD0 && m <= 0xD7)) { p += 2; continue; }
-        if (p + 4 > len) return null;
-        var segLen = (u8[p + 2] << 8) | u8[p + 3];
-        if (segLen < 2 || p + 2 + segLen > len) return null;
-        if (m === 0xC0 || m === 0xC1 || m === 0xC2) {
-          if (segLen < 7) return null;
-          h = (u8[p + 5] << 8) | u8[p + 6];
-          w = (u8[p + 7] << 8) | u8[p + 8];
-        }
-        if (m === 0xDA) {
-          var q = p + 2 + segLen;
-          while (q < len - 1) {
-            if (u8[q] === 0xFF) {
-              var nx = u8[q + 1];
-              if (nx === 0x00 || (nx >= 0xD0 && nx <= 0xD7)) { q += 2; continue; }
-              if (nx === 0xD9) return { end: q + 2, w: w, h: h };
-              if (nx === 0xFF) { q += 1; continue; }
-              return null;
-            }
-            q++;
-          }
-          return null;
-        }
-        p += 2 + segLen;
-      }
-      return null;
-    }
-    function collectTiffJpegs(u8, add) {
-      if (u8.length < 8) return;
-      var le = (u8[0] === 0x49 && u8[1] === 0x49);
-      var be = (u8[0] === 0x4D && u8[1] === 0x4D);
-      if (!le && !be) return;
-      var dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
-      function u16(o) { return dv.getUint16(o, le); }
-      function u32(o) { return dv.getUint32(o, le); }
-      if (u16(2) !== 42) return;
-      var queue = [u32(4)], seen = {}, steps = 0;
-      while (queue.length && steps++ < 64) {
-        var ifd = queue.shift();
-        if (!ifd || ifd < 8 || ifd > u8.length - 2 || seen[ifd]) continue;
-        seen[ifd] = 1;
-        var n = u16(ifd), jOff = -1, jLen = -1, i, e, tag, cnt, val;
+    /* v10: 引擎載入改由 raw16/index.js 嘅 module worker 負責（wasm 分塊喺 worker 內拼合），
+       舊主線程引擎載入函數已移除。 */
+    /* v8: 內嵌 JPEG 兜底（純 JS TIFF 解析，唔使 WASM）。
+       Sony/佳能/Nikon 等 ARW/CR2/NEF 入面有內嵌 JPEG preview（呢部機 1616x1080），
+       WASM 解唔到嗰陣自動用佢，唔會兩手空空。 */
+    function extractEmbeddedJpeg(u8) {
+      try {
+        if (u8.length < 16) return null;
+        var le = (u8[0] === 0x49 && u8[1] === 0x49);
+        var be = (u8[0] === 0x4D && u8[1] === 0x4D);
+        if (!le && !be) return null;
+        var dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+        function u16(o) { return dv.getUint16(o, le); }
+        function u32(o) { return dv.getUint32(o, le); }
+        if (u16(2) !== 42) return null;
+        var ifd = u32(4);
+        if (ifd < 8 || ifd > u8.length - 2) return null;
+        var n = u16(ifd), jpgOff = -1, jpgLen = -1, i, e, tag;
         for (i = 0; i < n; i++) {
           e = ifd + 2 + i * 12;
           if (e + 12 > u8.length) break;
-          tag = u16(e); cnt = u32(e + 4); val = u32(e + 8);
-          if (tag === 0x201) jOff = val;
-          else if (tag === 0x202) jLen = val;
-          else if (tag === 0x14A) {
-            if (cnt === 1) queue.push(val);
-            else if (cnt > 1 && cnt < 16) { for (var k = 0; k < cnt; k++) { if (val + k * 4 + 4 <= u8.length) queue.push(u32(val + k * 4)); } }
-          }
-          else if (tag === 0x8769 || tag === 0x8825 || tag === 0xA005) queue.push(val);
+          tag = u16(e);
+          if (tag === 0x201) jpgOff = u32(e + 8);
+          else if (tag === 0x202) jpgLen = u32(e + 8);
         }
-        if (jOff >= 0 && jLen > 1000 && jOff + jLen <= u8.length) add(jOff);
-        if (ifd + 2 + n * 12 + 4 <= u8.length) {
-          var next = u32(ifd + 2 + n * 12);
-          if (next) queue.push(next);
-        }
-      }
+        if (jpgOff < 0 || jpgLen <= 0 || jpgOff + jpgLen > u8.length) return null;
+        var jpg = u8.subarray(jpgOff, jpgOff + jpgLen);
+        if (jpg[0] !== 0xFF || jpg[1] !== 0xD8 || jpg[jpg.length-2] !== 0xFF || jpg[jpg.length-1] !== 0xD9) return null;
+        return jpg;
+      } catch (e) { return null; }
     }
-    function findEmbeddedJpegs(u8) {
-      var map = {};
-      function add(off) {
-        if (off < 0 || off + 4 > u8.length || map[off]) return;
-        if (u8[off] !== 0xFF || u8[off + 1] !== 0xD8) return;
-        var r = parseJpegStream(u8, off);
-        if (!r || !r.w || !r.h) return;
-        map[off] = { off: off, len: r.end - off, w: r.w, h: r.h };
-      }
-      try { collectTiffJpegs(u8, add); } catch (e) {}
-      for (var i = 0; i < u8.length - 2; i++) {
-        if (u8[i] === 0xFF && u8[i + 1] === 0xD8 && u8[i + 2] === 0xFF) {
-          add(i);
-          if (map[i]) i = map[i].off + map[i].len - 1;
-        }
-      }
-      var list = Object.keys(map).map(function (k) { return map[k]; });
-      list = list.filter(function (a) {
-        return !list.some(function (b) { return b !== a && a.off > b.off && a.off + a.len <= b.off + b.len; });
-      });
-      list = list.filter(function (a) { return a.w >= 320 && a.h >= 240; });
-      list.sort(function (a, b) { return (b.w * b.h) - (a.w * a.h); });
-      return list;
-    }
-    function decodeJpegBytes(jpgU8, maxEdge) {
-      // 瀏覽器原生 JPEG 解碼（唔經 WASM）；maxEdge 限制工作尺寸，保手機 RAM 安全
+    function decodeJpegBytes(jpgU8) {
+      // 用瀏覽器原生 JPEG 解碼（createImageBitmap），唔經 WASM
       return new Promise(function (resolve, reject) {
         var blob = new Blob([jpgU8], { type: "image/jpeg" });
         var url = URL.createObjectURL(blob);
         function cleanup() { try { URL.revokeObjectURL(url); } catch (e) {} }
         function done(img, w, h) {
           try {
-            var scale = maxEdge ? Math.min(1, maxEdge / Math.max(w, h)) : 1;
-            var tw = Math.max(1, Math.round(w * scale)), th = Math.max(1, Math.round(h * scale));
             var c = document.createElement("canvas");
-            c.width = tw; c.height = th;
+            c.width = w; c.height = h;
             var cx = c.getContext("2d");
-            cx.drawImage(img, 0, 0, tw, th);
-            var px = cx.getImageData(0, 0, tw, th).data;
-            var n = tw * th, f32 = new Float32Array(n * 3), i, j = 0;
+            cx.drawImage(img, 0, 0);
+            var px = cx.getImageData(0, 0, w, h).data;
+            var n = w * h, f32 = new Float32Array(n * 3), i, j = 0;
             for (i = 0; i < n; i++, j += 4) {
               f32[i*3] = px[j] / 255; f32[i*3+1] = px[j+1] / 255; f32[i*3+2] = px[j+2] / 255;
             }
             cleanup();
-            resolve({ f32: f32, w: tw, h: th, meta: null, via: "內嵌 JPEG 預覽" });
+            resolve({ f32: f32, w: w, h: h, meta: null, via: "內嵌 JPEG 預覽" });
           } catch (e) { cleanup(); reject(e); }
-        }
-        function fallbackImg() {
-          var im = new Image();
-          im.onload = function () { done(im, im.naturalWidth, im.naturalHeight); };
-          im.onerror = function () { cleanup(); reject(new Error("JPEG 預覽解碼失敗")); };
-          im.src = url;
         }
         if (window.createImageBitmap) {
           createImageBitmap(blob).then(function (bm) {
             done(bm, bm.width, bm.height);
             try { bm.close(); } catch (e) {}
-          }).catch(fallbackImg);
-        } else fallbackImg();
-      });
-    }
-    var lastRawFile = null;
-    function applyRawResult(r) {
-      rawMode = true;
-      rawStore = { data: r.f32, w: r.w, h: r.h };
-      rawMeta = r.meta;
-      fullW = r.w; fullH = r.h;
-      imgSrc = null;
-      rawVia = r.via || null; rawNote = r.note || null;
-      // v9 修復：RAW 流程唔經 buildCanvases，要自己初始化預覽尺寸同顯示 canvas，
-      // 否則 pvW/pvH=0，developRawPreview 會爆 ImageData（v8 潛伏 bug）
-      var rScale = Math.min(1, PV_MAX / Math.max(fullW, fullH));
-      pvW = Math.max(1, Math.round(fullW * rScale));
-      pvH = Math.max(1, Math.round(fullH * rScale));
-      origPv.width = pvW; origPv.height = pvH;
-      resultCanvas.width = pvW; resultCanvas.height = pvH;
-      origCanvas.width = pvW; origCanvas.height = pvH;
-      developRawFull(0);
-      afterImageReady("RAW");
-      updateRawBadge();
-    }
-    /* WASM 16-bit 解碼（v8 原有路徑）：v9 改做可選實驗功能，桌面 Chrome 較大機會成功；
-       失敗唔會影響已經載入嘅內嵌預覽圖。 */
-    function wasmDecode(file) {
-      return (async function () {
-        var step = "init", em, buf, raw, img, half;
-        try {
-          step = "下載引擎";
-          var wasmBinary = await fetchRawWasm();
-          step = "載入引擎模組";
-          var LibRawMod = await import("libraw-wasm");
-          var factory = LibRawMod.default || LibRawMod;
-          step = "初始化 WASM";
-          em = await factory({ wasmBinary: wasmBinary });
-          step = "讀取檔案";
-          buf = new Uint8Array(await file.arrayBuffer());
-          step = "建立解碼器";
-          raw = new em.LibRaw();
-          half = file.size > 24 * 1024 * 1024;
-          await new Promise(function (res) { setTimeout(res, 30); });
-          step = "WASM 解碼";
-          try {
-            raw.open(buf, { outputBps: 16, useCameraWb: true, outputColor: 1, halfSize: half, userQual: 3 });
-          } catch (e) {
-            throw new Error("open：" + (e && e.message ? e.message : e));
-          }
-          step = "取像素";
-          try { await raw.metadata(); } catch (e) {}
-          img = await raw.imageData();
-          try { raw.dispose(); } catch (e) {}
-          step = "轉換像素";
-          var w = img.width, h = img.height, data = img.data, n = w * h, i;
-          if (!w || !h || !data) throw new Error("imageData 回傳空（w=" + w + ",h=" + h + "）");
-          var f32 = new Float32Array(n * 3);
-          var u16 = null;
-          if (data instanceof Uint16Array) u16 = data;
-          else if (data && data.length === n * 6 && data.buffer) { try { u16 = new Uint16Array(data.buffer); } catch (e) {} }
-          if (u16 && u16.length >= n * 3) {
-            for (i = 0; i < n * 3; i++) f32[i] = u16[i] / 65535;
-          } else if (data && data.length >= n * 3) {
-            for (i = 0; i < n * 3; i++) f32[i] = data[i] / 255;
-          } else {
-            throw new Error("像素格式唔識（len=" + (data && data.length) + "）");
-          }
-          return { f32: f32, w: w, h: h, meta: null, via: "16-bit RAW" };
-        } catch (e) {
-          throw new Error("@" + step + "：" + (e && e.message ? e.message : String(e)));
+          }).catch(reject);
+        } else {
+          var im = new Image();
+          im.onload = function () { done(im, im.naturalWidth, im.naturalHeight); };
+          im.onerror = function () { cleanup(); reject(new Error("JPEG 預覽解碼失敗")); };
+          im.src = url;
         }
-      })();
-    }
-    function wasmDecodeWithTimeout(file) {
-      var timer = null;
-      var timeout = new Promise(function (_, rej) {
-        timer = setTimeout(function () { rej(new Error("16-bit 解碼超時（90 秒）")); }, 90000);
-      });
-      return Promise.race([wasmDecode(file), timeout]).finally(function () { clearTimeout(timer); });
-    }
-    function tryWasm16() {
-      if (!lastRawFile) return;
-      clearError();
-      setStatus("busy", "試緊 16-bit 全解碼（可能要等一陣，唔好離開頁面）…");
-      wasmDecodeWithTimeout(lastRawFile).then(function (r) {
-        r.note = "16-bit 全解碼成功，呢個係最高畫質版本。";
-        applyRawResult(r);
-        setStatus("ready", "16-bit 全解碼完成");
-      }).catch(function (e) {
-        setStatus("ready", "已載入（內嵌 JPEG 預覽）");
-        showError("16-bit 解碼失敗（" + (e && e.message ? e.message : e) + "）。而家繼續用緊內嵌預覽圖，唔受影響。");
       });
     }
     function decodeRAW(file) {
-      lastRawFile = file;
-      setStatus("busy", "讀取 RAW 內嵌預覽…");
+      setStatus("busy", "RAW 解碼緊（16-bit）…");
       clearError();
-      (async function () {
-        var ab = await file.arrayBuffer();
-        var u8 = new Uint8Array(ab);
-        var cands = findEmbeddedJpegs(u8);
-        for (var ci = 0; ci < cands.length; ci++) {
-          var c = cands[ci];
+      var done = function () {};
+      // v8: 每步獨立標記，出錯即知邊步死，唔使估
+      function wasmDecode() {
+        return (async function () {
+          var step = "init", buf, raw, img, half;
           try {
-            var r = await decodeJpegBytes(u8.subarray(c.off, c.off + c.len), 3200);
-            r.via = "內嵌 JPEG 預覽";
-            r.note = "直接用相機內嵌預覽圖（" + c.w + "×" + c.h +
-              (r.w !== c.w ? "，工作尺寸 " + r.w + "×" + r.h : "") +
-              "），即開即修，唔使等解碼。";
-            return r;
-          } catch (e) { /* 試下一張候選 */ }
-        }
-        throw new Error("搵唔到可用的內嵌預覽圖");
-      })().then(applyRawResult).catch(function (jpegErr) {
-        // 極少數無內嵌預覽嘅格式，先至試 WASM 16-bit
-        setStatus("busy", "搵唔到內嵌預覽，試緊 16-bit 解碼…");
-        wasmDecodeWithTimeout(file).then(applyRawResult).catch(function (e) {
-          rawMode = false; rawStore = null;
-          setStatus("error", "RAW 解碼失敗");
-          showError("呢個 RAW 檔讀取失敗：內嵌預覽搵唔到，16-bit 解碼亦失敗（" + (e && e.message ? e.message : e) + "）。建議喺電腦將 RAW 轉做 TIFF/JPG 再上傳。");
+            step = "載入引擎模組";
+            var LibRawMod = await import("libraw-wasm");
+            var LibRaw = LibRawMod.default || LibRawMod;
+            step = "讀取檔案";
+            buf = new Uint8Array(await file.arrayBuffer());
+            step = "建立解碼器";
+            raw = new LibRaw();
+            half = file.size > 24 * 1024 * 1024;
+            await new Promise(function (res) { setTimeout(res, 30); });
+            step = "WASM 解碼";
+            try {
+              await raw.open(buf, { outputBps: 16, useCameraWb: true, outputColor: 1, halfSize: half, userQual: 3 });
+            } catch (e) {
+              throw new Error("open：" + (e && e.message ? e.message : e));
+            }
+            step = "取像素";
+            try { await raw.metadata(); } catch (e) {}
+            img = await raw.imageData();
+            try { raw.dispose(); } catch (e) {}
+            step = "轉換像素";
+            var w = img.width, h = img.height, data = img.data, n = w * h, i;
+            if (!w || !h || !data) throw new Error("imageData 回傳空（w=" + w + ",h=" + h + "）");
+            var f32 = new Float32Array(n * 3);
+            var u16 = null;
+            if (data instanceof Uint16Array) u16 = data;
+            else if (data && data.length === n * 6 && data.buffer) { try { u16 = new Uint16Array(data.buffer); } catch (e) {} }
+            if (u16 && u16.length >= n * 3) {
+              for (i = 0; i < n * 3; i++) f32[i] = u16[i] / 65535;
+            } else if (data && data.length >= n * 3) {
+              for (i = 0; i < n * 3; i++) f32[i] = data[i] / 255;
+            } else {
+              throw new Error("像素格式唔識（len=" + (data && data.length) + "）");
+            }
+            return { f32: f32, w: w, h: h, meta: null, via: "16-bit RAW" };
+          } catch (e) {
+            throw new Error("@" + step + "：" + (e && e.message ? e.message : String(e)));
+          }
+        })();
+      }
+      var work = (async function () {
+        var timeoutMs = 90000, timer = null;
+        var loadTimer = new Promise(function (_, rej) {
+          timer = setTimeout(function () { rej(new Error("RAW 引擎載入超時（90秒），請轉 TIFF/JPG。")); }, timeoutMs);
         });
+        try {
+          return await Promise.race([wasmDecode(), loadTimer]);
+        } catch (wasmErr) {
+          // v8: WASM 失敗 → 自動試內嵌 JPEG（純 JS，唔使 WASM）
+          setStatus("busy", "WASM 解碼失敗，試緊內嵌 JPEG 預覽…");
+          try {
+            var ab = await file.arrayBuffer();
+            var jpg = extractEmbeddedJpeg(new Uint8Array(ab));
+            if (!jpg) throw new Error("搵唔到內嵌 JPEG");
+            var r = await decodeJpegBytes(jpg);
+            r.note = "WASM 失敗（" + (wasmErr && wasmErr.message ? wasmErr.message : wasmErr) + "），已改用內嵌 JPEG";
+            return r;
+          } catch (e2) {
+            throw new Error("WASM：" + (wasmErr && wasmErr.message ? wasmErr.message : wasmErr) + "；JPEG 兜底：" + (e2 && e2.message ? e2.message : e2));
+          }
+        } finally { clearTimeout(timer); }
+      })();
+      work.then(function (r) {
+        rawMode = true;
+        rawStore = { data: r.f32, w: r.w, h: r.h };
+        rawMeta = r.meta;
+        fullW = r.w; fullH = r.h;
+        imgSrc = null;
+        rawVia = r.via || null; rawNote = r.note || null;
+        developRawFull(0);
+        afterImageReady("RAW");
+        updateRawBadge();
+        done();
+      }).catch(function (e) {
+        rawMode = false; rawStore = null;
+        setStatus("error", "RAW 解碼失敗");
+        showError("RAW 解碼失敗：" + (e && e.message ? e.message : e));
+        done();
       });
+      return done;
     }
     function decodeTIFF(file) {
       setStatus("busy", "TIFF 解碼緊…");
