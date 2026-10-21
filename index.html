@@ -352,7 +352,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.1 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -1720,6 +1720,7 @@
     }
     // 由 16-bit Float32 開發做 ImageData（dw×dh），ev = 曝光 EV
     function developRawSampled(ev, dw, dh) {
+      dw = Math.max(1, dw | 0); dh = Math.max(1, dh | 0);
       var sw = rawStore.w, sh = rawStore.h, sd = rawStore.data;
       var gain = Math.pow(2, ev);
       var out = new ImageData(dw, dh), px = out.data;
@@ -1749,6 +1750,16 @@
       // 同步 origFull / origPv（AI 輸入同預覽基準）
       origFull.width = fullW; origFull.height = fullH;
       origFull.getContext("2d").drawImage(rawFullCanvas, 0, 0);
+      // v10.1 修復（RAW 一直失敗嘅真兇）：RAW 路徑唔經 buildCanvases，pvW/pvH 仲係 0，
+      // developRawPreview 用 0×0 砌 ImageData，WebKit 擲 IndexSizeError
+      //「The index is not in the allowed range」，再俾外層誤標做「RAW 解碼失敗」。
+      // 喺度跟 buildCanvases 同一公式補返預覽尺寸同畫布大小。
+      var scale = Math.min(1, PV_MAX / Math.max(fullW, fullH));
+      pvW = Math.max(1, Math.round(fullW * scale));
+      pvH = Math.max(1, Math.round(fullH * scale));
+      origPv.width = pvW; origPv.height = pvH;
+      resultCanvas.width = pvW; resultCanvas.height = pvH;
+      origCanvas.width = pvW; origCanvas.height = pvH;
       developRawPreview(ev);
     }
     /* v10: 引擎載入改由 raw16/index.js 嘅 module worker 負責（wasm 分塊喺 worker 內拼合），
