@@ -322,6 +322,7 @@
           <input type="range" id="whiten" min="0" max="100" step="1" value="0" />
           <span class="val" id="whitenVal">0%</span>
         </div>
+        <div class="note hidden" id="whitenNote"></div>
         <div class="note">貼士：先用 AI 強度定大方向；藍水相可以將色溫推向暖（正數）補返紅色；皮膚偏青就加少少美白。</div>
 
         <!-- v5: 專業調整面板（由 JS 生成：基本/顏色/細節/效果） -->
@@ -364,7 +365,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.6 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.7 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -413,6 +414,8 @@
     var PV_MAX = 1280;
     var origPv = document.createElement("canvas");
     var aiPv = null;
+    var aiRawOut = null;         // v10.7: AI 原始輸出（512 級）快取，RAW 改曝光時用嚟重建 aiPv 顏色層
+    var aiPvEv = null;           // v10.7: aiPv 對上一次按邊個 RAW 曝光值建立（null=未建立）
     var pvW = 0, pvH = 0;
     var lastBasePv = null;       // 最近一次「AI 混合後、微調前」嘅預覽 ImageData（俾水滴取樣用）
     var wb = null;               // {r,g,b} 白平衡倍率，null = 未取樣
@@ -683,7 +686,7 @@
       // 只清 AI 快取；原圖數據（imgSrc / rawFullCanvas / origPv / origFull）一律唔郁。
       // doRunAI 本身就係攞 imgSrc（JPG 原圖）／rawFullCanvas（RAW 解碼原圖）做輸入，
       // 所以撳幾多次，輸入都係同一張原圖，結果同第一次一樣。
-      aiPv = null; aiFull = null; skinCache = null; skinCacheKey = "";
+      aiPv = null; aiFull = null; aiRawOut = null; aiPvEv = null; skinCache = null; skinCacheKey = "";
       photoSeq++;
       setStatus("busy", "AI 重新還原緊（由原圖）…");
       runAI();
@@ -706,7 +709,7 @@
       var satV = rg < 0.5 ? 15 : 0; // 好藍就加少少飽和
       setSlider("temp", tempV);
       setSlider("bright", brightV);
-      setSlider("saturation", satV);
+      setSlider("p_saturation", satV); // v10.7：舊版寫錯 id（"saturation" 唔存在），飽和度永遠 set 唔到
       setSlider("aiStrength", 100);
       requestRender();
       setStatus("ok", "AI 自動微調完成（色溫 "+tempV+"、亮度 "+brightV+"）");
@@ -729,16 +732,16 @@
     // AI 在 512px 跑，放大會糊。改為：AI 只提供顏色（CbCr），原圖提供亮度細節（Y）。
     // v3: CbCr 用原圖 Y 做引導嘅邊緣保持平滑（防顏色化開 bleed 到皮膚）。
     // 再做自適應暖色：將 AI 顏色嘅 R/G 拉向 0.85、B/G 拉向 1.05。
-    function buildChromaAiPv(outCanvas, w, h) {
-      // 1. AI 輸出放大到預覽尺寸（顏色源）
+    function buildChromaAiPv(outCanvas, w, h, lumaCanvas) {
+      // 1. AI 輸出放大到目標尺寸（顏色源）
       var aiScaled = document.createElement("canvas");
       aiScaled.width = w; aiScaled.height = h;
       var actx = aiScaled.getContext("2d", { willReadFrequently: true });
       actx.imageSmoothingEnabled = true; actx.imageSmoothingQuality = "high";
       actx.drawImage(outCanvas, 0, 0, w, h);
       var aiD = actx.getImageData(0, 0, w, h).data;
-      // 2. 原圖預覽（細節源，已經係 w×h）
-      var origD = origPv.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
+      // 2. 亮度源（預設 origPv；v10.7 下載 RAW 時傳入曝光開發後嘅底圖，尺寸須同 w×h 一致）
+      var origD = (lumaCanvas || origPv).getContext("2d", { willReadFrequently: true }).getImageData(0, 0, w, h).data;
       var n = w * h;
       var Y = new Float32Array(n), cbR = new Float32Array(n), crR = new Float32Array(n);
       var i, r1, g1, b1, r2, g2, b2;
@@ -792,9 +795,11 @@
           px[i+2] = Math.min(255, px[i+2] * bGain);
         }
       }
-      aiPv = document.createElement("canvas");
-      aiPv.width = w; aiPv.height = h;
-      aiPv.getContext("2d").putImageData(out, 0, 0);
+      var merged = document.createElement("canvas");
+      merged.width = w; merged.height = h;
+      merged.getContext("2d").putImageData(out, 0, 0);
+      if (lumaCanvas) return merged; // v10.7: 俾下載路徑用，唔郁預覽 aiPv
+      aiPv = merged;
     }
 
     function doRunAI() {
@@ -832,6 +837,7 @@
             var outCanvas = document.createElement("canvas");
             outCanvas.width = ow; outCanvas.height = oh;
             outCanvas.getContext("2d").putImageData(outImg, 0, 0);
+            aiRawOut = outCanvas; // v10.7: 快取原始輸出，RAW 改曝光時重建顏色層用（唔使重跑推理）
             aiFull = document.createElement("canvas");
             aiFull.width = fullW; aiFull.height = fullH;
             var afctx = aiFull.getContext("2d");
@@ -842,6 +848,7 @@
             // v2: chroma/luma 分離 — AI 提供顏色，原圖提供細節（解決放大模糊）
             // + 自適應暖色 — 拉向 R/G=0.85, B/G=1.05（解決 AI 偏藍偏冷）
             buildChromaAiPv(outCanvas, pvW, pvH);
+            aiPvEv = getParams().exposure; // v10.7: 記低呢層顏色按邊個 RAW 曝光值嘅亮度建立
             ensurePerson(true); // v10.5: 用還原圖重計人物概率（靚過原圖版）
             setStatus("ready", "AI 還原完成");
             requestRender();
@@ -1353,6 +1360,40 @@
     }
 
     var lastSkinPct = 0;
+    /* ============ v10.7: 美白/磨皮遮罩（同皮膚選區開關解耦） ============
+       v10.6 實測：皮膚選區關咗／自動停用嗰陣，美白桿像素變動 = 0（靜靜死咗）。
+       而家：美白/磨皮自己攞遮罩——皮膚遮罩優先，認唔到膚色就用人物偵測範圍做後備，
+       兩樣都冇先至停用，並喺美白桿下面出狀態字，唔再冇聲冇氣。 */
+    var gateMaskCache = null, gateMaskKey = "";
+    function personGateMask(w, h) {
+      var key = photoSeq + "|" + w + "x" + h + "|" + (personFromAi ? "a" : "o");
+      if (gateMaskKey === key) return gateMaskCache;
+      var prob = getPersonAt(w, h);
+      gateMaskKey = key; gateMaskCache = null;
+      if (!prob) return null;
+      var n = w * h, m = new Float32Array(n), cnt = 0, i, v;
+      for (i = 0; i < n; i++) {
+        v = (prob[i] - 0.30) / 0.45; if (v < 0) v = 0; if (v > 1) v = 1;
+        m[i] = v; if (v > 0.5) cnt++;
+      }
+      if (cnt < n * 0.001) return null;
+      boxBlur(m, w, h, 2); boxBlur(m, w, h, 2);
+      gateMaskCache = m;
+      return m;
+    }
+    function effectiveSkinMask(base, w, h, aiK) {
+      var skin = getSkin(base, w, h, aiK);
+      if (skin) return { mask: skin.mask, via: "skin" };
+      var gm = personGateMask(w, h);
+      if (gm) return { mask: gm, via: "person" };
+      return null;
+    }
+    function updateWhitenNote(state) {
+      var el = $("whitenNote"); if (!el) return;
+      if (state === "person") { el.textContent = "（未認到膚色，美白／磨皮暫用人物偵測範圍）"; el.classList.remove("hidden"); }
+      else if (state === "none") { el.textContent = "⚠️ 未偵測到人物／膚色，美白同磨皮暫時無效"; el.classList.remove("hidden"); }
+      else { el.textContent = ""; el.classList.add("hidden"); }
+    }
     // v7: 將皮膚 mask 疊加顯示（紅色半透明），等用戶睇到檢測到邊度
     function overlaySkinMask(imgData, mask) {
       var d = imgData.data, n = imgData.width * imgData.height, i, p;
@@ -1416,13 +1457,22 @@
       fastScratch.width = w; fastScratch.height = h;
       var sctx = fastScratch.getContext("2d", { willReadFrequently: true });
       var base = blendData(fastOrig, fastAi, w, h, p.aiK, sctx);
+      // v10.7：同 renderFull 睇齊——美白/磨皮解耦（皮膚遮罩優先、人物範圍後備）
+      var skinF = null;
       if (skinOn && !skinAutoOff && skinSourceReady()) {
-        var skin = getSkin(base, w, h, p.aiK);
-        if (skin) {
-          applySkin(base, skin, parseInt($("skinStrength").value, 10) / 100);
-          if (p.whiten > 0) applyWhiten(base, skin.mask, p.whiten);
-          if (p.smoothSkin > 0) applySmooth(base, skin.mask, p.smoothSkin);
-          if (skinMaskView) overlaySkinMask(base, skin.mask);
+        skinF = getSkin(base, w, h, p.aiK);
+        if (skinF) applySkin(base, skinF, parseInt($("skinStrength").value, 10) / 100);
+      }
+      if (p.whiten > 0 || p.smoothSkin > 0 || skinMaskView) {
+        var mF = skinF ? skinF.mask : null;
+        if (!mF && skinSourceReady()) {
+          var emF = effectiveSkinMask(base, w, h, p.aiK);
+          if (emF) mF = emF.mask;
+        }
+        if (mF) {
+          if (p.whiten > 0) applyWhiten(base, mF, p.whiten);
+          if (p.smoothSkin > 0) applySmooth(base, mF, p.smoothSkin);
+          if (skinMaskView) overlaySkinMask(base, mF);
         }
       }
       applyBasic(base, p);
@@ -1440,7 +1490,18 @@
       if (!origImg && !rawMode) return;
       var p = getParams();
       // v5: RAW 嘅曝光由 16-bit 重新開發（唔經 8-bit 乘法）
-      if (rawMode && rawStore) { developRawPreview(p.exposure); p.exposure = 0; }
+      if (rawMode && rawStore) {
+        developRawPreview(p.exposure);
+        // v10.7：AI 顏色層嘅亮度嚟自建立嗰刻嘅 origPv。曝光變咗要用新亮度重建顏色層，
+        // 否則 AI 強度>0 時推曝光結果完全唔郁（v10.6 實測：結果亮度零變化、淨係原圖變）。
+        // 用快取嘅 AI 原始輸出重建，唔使重跑推理；原圖（origCanvas）永遠唔喺度郁。
+        if (aiRawOut && aiPv && aiPvEv !== p.exposure) {
+          buildChromaAiPv(aiRawOut, pvW, pvH);
+          aiPvEv = p.exposure;
+          skinCache = null; skinCacheKey = "";
+        }
+        p.exposure = 0;
+      }
       scratchPv.width = pvW; scratchPv.height = pvH;
       var sctx = scratchPv.getContext("2d", { willReadFrequently: true });
       var base = blendData(origPv, aiPv, pvW, pvH, p.aiK, sctx);
@@ -1448,17 +1509,32 @@
       // v10.5: 人物概率未計好就而家觸發（RAW 路徑唔經 afterImageReady，靠呢度補）
       if (!personBusy && personSeq !== photoSeq) ensurePerson(false);
       // v6 管線：皮膚分區（白平衡＋美白＋磨皮） → 基本 → 顏色 → 細節 → 效果
+      // v10.7：美白/磨皮同「皮膚選區」開關解耦——開關只管皮膚白平衡（applySkin）；
+      // 美白/磨皮用 effectiveSkinMask（皮膚遮罩優先、人物範圍後備、都冇就出提示字）。
+      var effMask = null, effVia = "skin";
       if (skinOn && !skinAutoOff && skinSourceReady()) {
         var skin = getSkin(base, pvW, pvH, p.aiK);
         if (skin) {
           applySkin(base, skin, parseInt($("skinStrength").value, 10) / 100);
-          if (p.whiten > 0) applyWhiten(base, skin.mask, p.whiten);
-          if (p.smoothSkin > 0) applySmooth(base, skin.mask, p.smoothSkin);
-          if (skinMaskView) overlaySkinMask(base, skin.mask);
           lastSkinPct = skin.pct;
+          effMask = skin.mask;
         } else {
           skinAutoOff = true;
           updateSkinUI();
+        }
+      }
+      if (p.whiten > 0 || p.smoothSkin > 0 || skinMaskView) {
+        if (!effMask && skinSourceReady()) {
+          var em = effectiveSkinMask(base, pvW, pvH, p.aiK);
+          if (em) { effMask = em.mask; effVia = em.via; }
+        }
+        if (effMask) {
+          if (p.whiten > 0) applyWhiten(base, effMask, p.whiten);
+          if (p.smoothSkin > 0) applySmooth(base, effMask, p.smoothSkin);
+          if (skinMaskView) overlaySkinMask(base, effMask);
+          updateWhitenNote(effVia);
+        } else {
+          updateWhitenNote("none");
         }
       }
       applyBasic(base, p);
@@ -1659,23 +1735,36 @@
       out.width = tw; out.height = th;
       var octx = out.getContext("2d", { willReadFrequently: true });
       if (!octx) throw new Error("開唔到出圖畫布");
-      var baseC;
+      var baseC, aiSrcDl = aiFull;
       if (rawMode && rawStore) {
         // RAW：直接由 16-bit 數據開發到目標尺寸（含曝光），唔經全尺寸中轉
         baseC = document.createElement("canvas");
         baseC.width = tw; baseC.height = th;
         baseC.getContext("2d").putImageData(developRawSampled(pp.exposure, tw, th), 0, 0);
         pp.exposure = 0;
+        // v10.7：同預覽睇齊——用「按今次曝光開發嘅底圖」做亮度重建 AI 顏色層，
+        // 否則 AI 強度高時下載圖會無視曝光桿（同 v10.6 預覽同一個病）。
+        // 大圖（>約 9.5MP）維持舊 aiFull 路徑，避免全尺寸引導濾波太慢。
+        if (aiRawOut && pp.aiK > 0 && tw * th <= 9500000) {
+          try { aiSrcDl = buildChromaAiPv(aiRawOut, tw, th, baseC); } catch (eDl) { aiSrcDl = aiFull; }
+        }
       } else {
         baseC = origFull;
       }
-      var imgData = blendData(baseC, aiFull, tw, th, pp.aiK, octx);
+      var imgData = blendData(baseC, aiSrcDl, tw, th, pp.aiK, octx);
       // v10.6 防禦：lastBasePv 未就緒（未 render 過）就跳過皮膚段，唔好成個下載死喺度
-      if (skinOn && !skinAutoOff && lastBasePv) {
-        var dSkin = getSkin(lastBasePv, pvW, pvH, pp.aiK);
+      // v10.7：同預覽睇齊——applySkin 跟皮膚開關；美白/磨皮獨立攞遮罩（皮膚優先、人物後備）
+      if (lastBasePv) {
+        var dMaskFull = null;
+        var dSkin = (skinOn && !skinAutoOff) ? getSkin(lastBasePv, pvW, pvH, pp.aiK) : null;
         if (dSkin) {
           applySkin(imgData, dSkin, parseInt($("skinStrength").value, 10) / 100);
-          var dMaskFull = resampleMask(dSkin.mask, dSkin.mw, dSkin.mh, tw, th);
+          dMaskFull = resampleMask(dSkin.mask, dSkin.mw, dSkin.mh, tw, th);
+        } else if (pp.whiten > 0 || pp.smoothSkin > 0) {
+          var dEm = effectiveSkinMask(lastBasePv, pvW, pvH, pp.aiK);
+          if (dEm) dMaskFull = resampleMask(dEm.mask, pvW, pvH, tw, th);
+        }
+        if (dMaskFull) {
           if (pp.whiten > 0) applyWhiten(imgData, dMaskFull, pp.whiten);
           if (pp.smoothSkin > 0) applySmooth(imgData, dMaskFull, pp.smoothSkin);
         }
@@ -1932,14 +2021,14 @@
 
     /* ---------- v5 顏色：白平衡/色溫/色調/自然飽和/飽和/HSL/美白 ---------- */
     var HSL_DEF = [
-      { c: 0,   hw: 40, id: "r" },
-      { c: 30,  hw: 40, id: "o" },
-      { c: 60,  hw: 40, id: "y" },
-      { c: 120, hw: 40, id: "g" },
-      { c: 180, hw: 40, id: "c" },
-      { c: 222, hw: 40, id: "b" },
-      { c: 270, hw: 40, id: "p" },
-      { c: 300, hw: 40, id: "m" }
+      { c: 0,   hw: 36, id: "r" },
+      { c: 30,  hw: 36, id: "o" },
+      { c: 60,  hw: 36, id: "y" },
+      { c: 120, hw: 36, id: "g" },
+      { c: 180, hw: 36, id: "c" },
+      { c: 222, hw: 36, id: "b" },
+      { c: 270, hw: 36, id: "p" },
+      { c: 300, hw: 36, id: "m" }
     ]; // v7: 8色，hw 加闊保證無死區，相鄰色重疊羽化
     function applyColor(imgData, p) {
       var mR = (wb ? wb.r : 1) * (1 + 0.35 * p.temp);
@@ -1959,25 +2048,34 @@
       var d = imgData.data, i, r, g, b, avg, mx, mn, st, vb, j, wt, hsl, rgb;
       for (i = 0; i < d.length; i += 4) {
         r = d[i] / 255 * mR; g = d[i + 1] / 255 * mG; b = d[i + 2] / 255 * mB;
-        if (vib !== 0) { // 自然飽和度：低飽和像素加得多啲
-          avg = (r + g + b) / 3; mx = Math.max(r, g, b); mn = Math.min(r, g, b);
-          st = (mx - mn) / (mx + 1e-6); vb = 1 + vib * 0.7 * (1 - st);
-          r = avg + (r - avg) * vb; g = avg + (g - avg) * vb; b = avg + (b - avg) * vb;
-        }
+        /* v10.7：自然飽和度改喺下面 HSL 段做（RGB 通道散開乘數會令高飽和像素
+           絕對升幅反而大過低飽和，同「提啞色」定義相反，實測 +0.178 vs +0.093） */
         if (satK !== 1) {
           avg = (r + g + b) / 3;
           r = avg + (r - avg) * satK; g = avg + (g - avg) * satK; b = avg + (b - avg) * satK;
         }
-        if (hslOn) {
+        if (hslOn || vib !== 0) {
           hsl = rgb2hsl(Math.min(1, Math.max(0, r)), Math.min(1, Math.max(0, g)), Math.min(1, Math.max(0, b)));
           var hh = hsl[0], ss = hsl[1], ll = hsl[2];
-          for (j = 0; j < HSL_DEF.length; j++) {
-            wt = 1 - sstep(hc[j].def.hw * 0.55, hc[j].def.hw, angDist(hh, hc[j].def.c));
-            if (wt > 0) {
-              hh += hc[j].h * wt;
-              ss *= (1 + hc[j].s * wt);
-              ll *= (1 + hc[j].l * wt);
+          if (vib !== 0) {
+            // v10.7 自然飽和：直接喺飽和度上做遞減曲線——低飽和加得多、高飽和加得少（絕對升幅都係）
+            if (vib > 0) ss += vib * 0.38 * (1 - ss) * (1 - ss);
+            else ss *= (1 + vib * 0.8);
+          }
+          if (hslOn) {
+            // v10.7 兩處修正：(1) 權重一律用原始色相計晒所有色帶（舊版喺迴圈入面改 hh，
+            // 後面色帶嘅權重用咗偏移後嘅色相計，色帶之間互相串擾）；
+            // (2) 羽化窗收窄（HSL_DEF hw 40→36、sstep 起點 0.55→0.30），壓低鄰色中心滲漏。
+            var hShift = 0, sMul = 1, lMul = 1;
+            for (j = 0; j < HSL_DEF.length; j++) {
+              wt = 1 - sstep(hc[j].def.hw * 0.30, hc[j].def.hw, angDist(hh, hc[j].def.c));
+              if (wt > 0) {
+                hShift += hc[j].h * wt;
+                sMul *= (1 + hc[j].s * wt);
+                lMul *= (1 + hc[j].l * wt);
+              }
             }
+            hh += hShift; ss *= sMul; ll *= lMul;
           }
           ss = Math.min(1, Math.max(0, ss)); ll = Math.min(1, Math.max(0, ll));
           rgb = hsl2rgb(hh, ss, ll); r = rgb[0]; g = rgb[1]; b = rgb[2];
@@ -2054,7 +2152,9 @@
           if (vig !== 0) {
             var dx = (x / (w - 1) - 0.5) * 2;
             var vm = sstep(0.35, 1.9, dx * dx + dy * dy);
-            var fv = 1 + vig * 0.55 * vm;
+            // v10.7：暗角方向修正——正數 = 加暗角（四角變暗），負數 = 提亮四角。
+            // v10.6 寫反咗方向（實測 +100 令四角變光 +18.9 級）。
+            var fv = 1 - vig * 0.55 * vm;
             d[i] *= fv; d[i + 1] *= fv; d[i + 2] *= fv;
           }
           if (gr !== 0) {
@@ -2198,7 +2298,7 @@
         badge.innerHTML = "📷 RAW 解碼（" + via + "）" +
           (rawMeta && rawMeta.model ? " · " + rawMeta.model : "") +
           " · " + rawStore.w + "×" + rawStore.h + "（" + mp + "MP）" + note +
-          "<br><small>曝光桿會由線性數據重新開發。</small>";
+          "<br><small>曝光桿會由線性數據重新開發；對比原圖固定用曝光 0 版本，任何調整都唔會郁到佢。</small>";
         badge.classList.remove("hidden");
       } else { badge.classList.add("hidden"); badge.innerHTML = ""; }
     }
@@ -2225,11 +2325,9 @@
     function developRawPreview(ev) {
       var img = developRawSampled(ev, pvW, pvH);
       origPv.getContext("2d").putImageData(img, 0, 0);
-      // v10.3 修復：同步對比舞台嘅 origCanvas。之前 RAW 路徑冇人畫 origCanvas，
-      // 佢一直全透明，拉桿左邊「原圖」其實係透過去睇下面嘅還原圖，兩邊睇落一樣。
-      if (origCanvas.width === pvW && origCanvas.height === pvH) {
-        origCanvas.getContext("2d").drawImage(origPv, 0, 0);
-      }
+      // v10.7：唔再同步 origCanvas！v10.3 嗰陣為咗修「左邊原圖全透明」將開發圖同步埋去，
+      // 結果推曝光桿連對比原圖都跟住變（用戶點名投訴）。origCanvas 而家只喺
+      // developRawFull 用曝光 0 畫一次凍結，之後任何桿、任何掣都唔准再郁佢。
     }
     function developRawFull(ev) {
       var img = developRawSampled(ev, fullW, fullH);
@@ -2250,6 +2348,8 @@
       resultCanvas.width = pvW; resultCanvas.height = pvH;
       origCanvas.width = pvW; origCanvas.height = pvH;
       developRawPreview(ev);
+      // v10.7：對比「原圖」＝曝光 0 開發版，喺解碼完成嗰刻畫一次，之後凍結。
+      origCanvas.getContext("2d").putImageData(developRawSampled(0, pvW, pvH), 0, 0);
       buildFastCanvases(); // v10.4: RAW 預覽尺寸落實後整返細解像度設定
     }
     /* v10: 引擎載入改由 raw16/index.js 嘅 module worker 負責（wasm 分塊喺 worker 內拼合），
@@ -2438,7 +2538,7 @@
     }
     // 上傳圖 ready 後嘅共通流程（JPG/TIFF/RAW 共用；RAW 唔經呢度，佢自己 develop）
     function afterImageReady(kind) {
-      aiFull = null; aiPv = null;
+      aiFull = null; aiPv = null; aiRawOut = null; aiPvEv = null;
       wb = null; updateWbUI();
       photoSeq++;
       personProb = null; personSeq = -1; personFromAi = false; // v10.5: 新相要重計人物
