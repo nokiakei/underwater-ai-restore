@@ -340,7 +340,7 @@
               <span class="val" id="smoothSkinVal">0%</span>
             </div>
             <div class="note">磨皮只喺皮膚區做邊緣保留平滑，去皺紋豆豆唔糊五官。美白喺「手動微調」。</div>
-            <div class="note" id="skinNote">自動偵測膚色（YCbCr），只將皮膚區拉向中性，藍色背景唔郁。如果偵測到皮膚少過 0.1%，會自動停用。</div>
+            <div class="note" id="skinNote">AI 人物分割（PP-HumanSeg）＋膚色分析：先認人，再喺人物範圍入面揀皮膚，只將皮膚區拉向中性，背景唔郁。如果偵測到皮膚少過 0.1%，會自動停用。</div>
 
           </div>
         </details>
@@ -353,7 +353,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.4 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.5 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -423,6 +423,17 @@
     var skinCache = null;        // {mask, mw, mh, k}，預覽解像度快取
     var skinCacheKey = "";
 
+    /* ============ v10.5: 人物分割（PP-HumanSeg） ============
+       舊 YCbCr 死閾值喺水下相度全滅（實測：5 張原圖人身上檢出≈0，
+       mask 反而蓋住暖光天花/建築）。改用 PP-HumanSeg 做人物閘門，
+       閘門入面再用光/暗兩支揀皮膚（詳見 computeSkinAI）。 */
+    var segSession = null, segReady = false, segLoading = false;
+    var personProb = null;         // Float32Array（預覽尺寸）人物概率
+    var personCanvas = document.createElement("canvas");
+    var personSeq = -1;            // personProb 對應邊個 photoSeq
+    var personFromAi = false;      // 概率圖係咪由 AI 還原圖計（靚過原圖版）
+    var personBusy = false;
+
     /* ============ v5: RAW / 專業面板狀態 ============ */
     var rawMode = false, rawVia = null, rawNote = null;             // 而家呢張係咪 RAW 解出嚟
     var rawStore = null;             // {data:Float32Array(0-1), w, h} 16-bit 解碼暫存
@@ -479,6 +490,111 @@
       return Promise.all(jobs).then(function (texts) {
         return b64ToBytes(texts.join("").replace(/\s+/g, ""));
       });
+    }
+
+    /* ============ v10.5: 人物分割模型（PP-HumanSeg FP32，分塊 seg.partXX） ============ */
+    var SEG_PARTS = 83;
+
+    function fetchSegParts() {
+      var jobs = [];
+      for (var i = 0; i < SEG_PARTS; i++) {
+        var name = "seg.part" + (i < 10 ? "0" + i : "" + i);
+        jobs.push(fetch(name).then(function (r) {
+          if (!r.ok) throw new Error("下載 " + name + " 失敗（HTTP " + r.status + "）");
+          return r.text();
+        }));
+      }
+      return Promise.all(jobs).then(function (texts) {
+        return b64ToBytes(texts.join("").replace(/\s+/g, ""));
+      });
+    }
+
+    // 背景載入，唔阻塞主還原；失敗就靜默用返舊 YCbCr 檢測（segFailed 後唔再重試）
+    var segFailed = false;
+    function loadSegModel() {
+      if (segLoading || segReady || segFailed || typeof ort === "undefined") return;
+      segLoading = true;
+      fetchSegParts()
+        .then(function (bytes) {
+          return ort.InferenceSession.create(bytes.buffer, { executionProviders: ["wasm"] });
+        })
+        .then(function (s) {
+          segSession = s; segReady = true; segLoading = false;
+          ensurePerson(false);
+        })
+        .catch(function () { segLoading = false; segFailed = true; });
+    }
+
+    // 跑一次人物分割（每張相最多兩次：原圖版 → AI 版），結果存 personProb（預覽尺寸）
+    function ensurePerson(wantAi) {
+      if (!segReady) { loadSegModel(); return; }
+      if (personBusy || pvW < 8 || pvH < 8) return;
+      var src = (wantAi && aiPv) ? aiPv : (aiPv || origPv);
+      if (!src) return;
+      var fromAi = (src === aiPv);
+      if (personProb && personSeq === photoSeq) {
+        if (personFromAi || !fromAi) return; // 已有同等或更好版本
+      }
+      personBusy = true;
+      var SW = 192, SH = 192, n = SW * SH, i;
+      var tc = document.createElement("canvas");
+      tc.width = SW; tc.height = SH;
+      var tctx = tc.getContext("2d", { willReadFrequently: true });
+      tctx.drawImage(src, 0, 0, SW, SH);
+      var px = tctx.getImageData(0, 0, SW, SH).data;
+      var input = new Float32Array(3 * n);
+      for (i = 0; i < n; i++) {
+        input[i] = px[i * 4] / 127.5 - 1;
+        input[n + i] = px[i * 4 + 1] / 127.5 - 1;
+        input[2 * n + i] = px[i * 4 + 2] / 127.5 - 1;
+      }
+      var feeds = {};
+      feeds[segSession.inputNames[0]] = new ort.Tensor("float32", input, [1, 3, SH, SW]);
+      var seqAtStart = photoSeq;
+      segSession.run(feeds).then(function (results) {
+        personBusy = false;
+        if (seqAtStart !== photoSeq) return; // 期間換咗相，丟棄
+        try {
+          var od = results[segSession.outputNames[0]].data; // [1,2,192,192]，ch1=人物（已 softmax）
+          var img = new ImageData(SW, SH), d8 = img.data, j, v;
+          for (j = 0; j < n; j++) {
+            v = od[n + j];
+            v = v < 0 ? 0 : (v > 1 ? 1 : v);
+            var g8 = Math.round(v * 255);
+            d8[j * 4] = g8; d8[j * 4 + 1] = g8; d8[j * 4 + 2] = g8; d8[j * 4 + 3] = 255;
+          }
+          var small = document.createElement("canvas");
+          small.width = SW; small.height = SH;
+          small.getContext("2d").putImageData(img, 0, 0);
+          personCanvas.width = pvW; personCanvas.height = pvH;
+          var pctx = personCanvas.getContext("2d", { willReadFrequently: true });
+          pctx.imageSmoothingEnabled = true; pctx.imageSmoothingQuality = "high";
+          pctx.drawImage(small, 0, 0, pvW, pvH);
+          var pd = pctx.getImageData(0, 0, pvW, pvH).data;
+          var prob = new Float32Array(pvW * pvH);
+          for (var k2 = 0; k2 < prob.length; k2++) prob[k2] = pd[k2 * 4] / 255;
+          personProb = prob; personSeq = photoSeq; personFromAi = fromAi;
+          skinCache = null; skinCacheKey = "";
+          // 原圖版檢測可能喺未還原圖上誤觸自動停用；AI 版人物圖先係準嘅，到咗要翻生
+          if (fromAi && skinAutoOff) { skinAutoOff = false; updateSkinUI(); }
+          requestRender();
+        } catch (e) { /* 處理失敗：保留舊檢測 */ }
+      }).catch(function () { personBusy = false; });
+    }
+
+    // 攞 (w,h) 尺寸嘅人物概率（預覽尺寸直接用，其餘縮放取樣）
+    var _personScratch = document.createElement("canvas");
+    function getPersonAt(w, h) {
+      if (!personProb || personSeq !== photoSeq) return null;
+      if (w === pvW && h === pvH) return personProb;
+      _personScratch.width = w; _personScratch.height = h;
+      var ctx = _personScratch.getContext("2d", { willReadFrequently: true });
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(personCanvas, 0, 0, w, h);
+      var d = ctx.getImageData(0, 0, w, h).data;
+      var out = new Float32Array(w * h);
+      for (var i = 0; i < out.length; i++) out[i] = d[i * 4] / 255;
+      return out;
     }
 
     /* ============ 上傳 ============ */
@@ -711,6 +827,7 @@
             // v2: chroma/luma 分離 — AI 提供顏色，原圖提供細節（解決放大模糊）
             // + 自適應暖色 — 拉向 R/G=0.85, B/G=1.05（解決 AI 偏藍偏冷）
             buildChromaAiPv(outCanvas, pvW, pvH);
+            ensurePerson(true); // v10.5: 用還原圖重計人物概率（靚過原圖版）
             setStatus("ready", "AI 還原完成");
             requestRender();
           } catch (e2) {
@@ -1028,9 +1145,164 @@
       return out;
     }
 
-    // 喺 AI blend 後嘅預覽 ImageData 上做膚色檢測。
-    // 回傳 {mask, mw, mh, k}；皮膚像素 <0.5% 就回傳 null（叫出面自動停用）。
+    // v10.5: 檢測來源就緒未 — 人物模型仲載緊/計緊嗰陣唔好行舊檢測住：
+    // 舊檢測喺未還原嘅原圖上會誤觸「<0.1% 自動停用」，等人物概率到咗都翻唔返生。
+    function skinSourceReady() {
+      if (personProb && personSeq === photoSeq) return true;
+      if (segFailed) return true;
+      if (!segReady && !segLoading) return true; // 模型根本用唔到 → 舊檢測頂上
+      return false;
+    }
+
+    // v10.5: 皮膚檢測分流 — 有人物概率圖就用 AI 閘門版；未載好就用舊 YCbCr 版頂住。
+    // 回傳 {mask, mw, mh, k, pct}；皮膚太少就回傳 null（叫出面自動停用）。
     function computeSkin(base, w, h) {
+      var person = getPersonAt(w, h);
+      if (person) return computeSkinAI(base, w, h, person);
+      return computeSkinLegacy(base, w, h);
+    }
+
+    // v10.5: 人物閘門清理 — 3x3 opening + 連通域（保留最大域 + >=0.05% 嘅域，唔好誤殺細人）
+    function cleanGate(bin, w, h) {
+      var n = w * h, x, y, i, dx, dy, xx, yy, row;
+      var eroded = new Uint8Array(n), opened = new Uint8Array(n);
+      for (y = 0; y < h; y++) {
+        row = y * w;
+        for (x = 0; x < w; x++) {
+          if (!bin[row + x]) continue;
+          var ok = 1;
+          for (dy = -1; dy <= 1 && ok; dy++) {
+            yy = y + dy;
+            if (yy < 0 || yy >= h) { ok = 0; break; }
+            for (dx = -1; dx <= 1; dx++) {
+              xx = x + dx;
+              if (xx < 0 || xx >= w || !bin[yy * w + xx]) { ok = 0; break; }
+            }
+          }
+          if (ok) eroded[row + x] = 1;
+        }
+      }
+      for (y = 0; y < h; y++) {
+        row = y * w;
+        for (x = 0; x < w; x++) {
+          var hit = 0;
+          for (dy = -1; dy <= 1 && !hit; dy++) {
+            yy = y + dy;
+            if (yy < 0 || yy >= h) continue;
+            for (dx = -1; dx <= 1; dx++) {
+              xx = x + dx;
+              if (xx < 0 || xx >= w) continue;
+              if (eroded[yy * w + xx]) { hit = 1; break; }
+            }
+          }
+          opened[row + x] = hit;
+        }
+      }
+      // 連通域（union-find 兩遍，同 cleanSkinMask 同款）
+      var parent = new Int32Array(n);
+      for (i = 0; i < n; i++) parent[i] = opened[i] ? i : -1;
+      function find(a) {
+        var r = a;
+        while (parent[r] !== r) r = parent[r];
+        while (parent[a] !== r) { var t = parent[a]; parent[a] = r; a = t; }
+        return r;
+      }
+      for (y = 0; y < h; y++) {
+        row = y * w;
+        for (x = 0; x < w; x++) {
+          i = row + x;
+          if (!opened[i]) continue;
+          if (x > 0 && opened[i - 1]) { var a1 = find(i), b1 = find(i - 1); if (a1 !== b1) parent[a1] = b1; }
+          if (y > 0 && opened[i - w]) { var a2 = find(i), b2 = find(i - w); if (a2 !== b2) parent[a2] = b2; }
+        }
+      }
+      var size = new Int32Array(n), maxRoot = -1, maxSize = 0;
+      for (i = 0; i < n; i++) {
+        if (!opened[i]) continue;
+        var r0 = find(i);
+        size[r0]++;
+        if (size[r0] > maxSize) { maxSize = size[r0]; maxRoot = r0; }
+      }
+      var minSize = Math.floor(n * 0.0005);
+      var out = new Uint8Array(n);
+      for (i = 0; i < n; i++) {
+        if (!opened[i]) continue;
+        var rr = find(i);
+        if (rr === maxRoot || size[rr] >= minSize) out[i] = 1;
+      }
+      return out;
+    }
+
+    /* v10.5 主檢測（PP-HumanSeg 閘門版；Python 實測 7 張相驗證）：
+       閘門 = 人物概率 >0.3（清理後）；閘門 <0.3% → null。
+       放寬盒（Cb70-140/Cr120-185/Y>45）喺閘門命中 >=55% → 光支：皮膚 = 閘門 ∩ 放寬盒；
+       否則暗支 ProxyA：皮膚 = 閘門 − (Y<28) − (飽和度>0.42)。
+       軟 mask = 皮膚 × clip(人物概率/0.5) 再 blur 兩次；skinK 喺「皮膚∩放寬盒」像素計（唔夠就成個皮膚計）。 */
+    function computeSkinAI(base, w, h, gs) {
+      var d = base.data, n = w * h, i;
+      var gate = new Uint8Array(n);
+      for (i = 0; i < n; i++) if (gs[i] > 0.3) gate[i] = 1;
+      gate = cleanGate(gate, w, h);
+      var gateCnt = 0;
+      for (i = 0; i < n; i++) gateCnt += gate[i];
+      if (gateCnt < n * 0.003) return null;
+      // pass 1：計放寬盒命中率
+      var r, g, b, y, cb, cr, hitCnt = 0;
+      for (i = 0; i < n; i++) {
+        if (!gate[i]) continue;
+        r = d[i * 4]; g = d[i * 4 + 1]; b = d[i * 4 + 2];
+        y = 0.299 * r + 0.587 * g + 0.114 * b;
+        cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+        cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+        if (cb >= 70 && cb <= 140 && cr >= 120 && cr <= 185 && y > 45) hitCnt++;
+      }
+      var light = (hitCnt / gateCnt) >= 0.55;
+      // pass 2：揀皮膚 + 累計 skinK 統計
+      var skin = new Uint8Array(n);
+      var skinCnt = 0;
+      var kR = 0, kG = 0, kCnt = 0;       // 皮膚∩放寬盒（計 k 首選）
+      var aR = 0, aG = 0;                 // 成個皮膚（後備）
+      var mx, mn, sat, relaxed;
+      for (i = 0; i < n; i++) {
+        if (!gate[i]) continue;
+        r = d[i * 4]; g = d[i * 4 + 1]; b = d[i * 4 + 2];
+        y = 0.299 * r + 0.587 * g + 0.114 * b;
+        cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+        cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+        relaxed = (cb >= 70 && cb <= 140 && cr >= 120 && cr <= 185 && y > 45);
+        var isSkin;
+        if (light) {
+          isSkin = relaxed;
+        } else {
+          mx = Math.max(r, g, b); mn = Math.min(r, g, b);
+          sat = mx > 0 ? (mx - mn) / mx : 0;
+          isSkin = (y >= 28 && sat <= 0.42);
+        }
+        if (isSkin) {
+          skin[i] = 1; skinCnt++;
+          aR += r; aG += g;
+          if (relaxed) { kR += r; kG += g; kCnt++; }
+        }
+      }
+      if (skinCnt < n * 0.001) return null;
+      var skinRG;
+      if (kCnt >= 30) skinRG = kR / Math.max(kG, 1e-6);
+      else skinRG = aR / Math.max(aG, 1e-6);
+      var skinK = clamp(1.12 / skinRG, 0.85, 1.5);
+      var mask = new Float32Array(n);
+      for (i = 0; i < n; i++) {
+        if (skin[i]) {
+          var gv = gs[i] / 0.5;
+          mask[i] = gv > 1 ? 1 : gv;
+        }
+      }
+      mask = blurMask(mask, w, h);
+      mask = blurMask(mask, w, h);
+      return { mask: mask, mw: w, mh: h, k: skinK, pct: skinCnt / n * 100 };
+    }
+
+    // 舊檢測（YCbCr 死閾值）— 只做人物模型未載好／載入失敗嗰陣嘅後備。
+    function computeSkinLegacy(base, w, h) {
       var d = base.data, n = w * h;
       var mask = new Float32Array(n);
       var sumR = 0, sumG = 0, cnt = 0;
@@ -1129,7 +1401,7 @@
       fastScratch.width = w; fastScratch.height = h;
       var sctx = fastScratch.getContext("2d", { willReadFrequently: true });
       var base = blendData(fastOrig, fastAi, w, h, p.aiK, sctx);
-      if (skinOn && !skinAutoOff) {
+      if (skinOn && !skinAutoOff && skinSourceReady()) {
         var skin = getSkin(base, w, h, p.aiK);
         if (skin) {
           applySkin(base, skin, parseInt($("skinStrength").value, 10) / 100);
@@ -1158,8 +1430,10 @@
       var sctx = scratchPv.getContext("2d", { willReadFrequently: true });
       var base = blendData(origPv, aiPv, pvW, pvH, p.aiK, sctx);
       lastBasePv = new ImageData(new Uint8ClampedArray(base.data), pvW, pvH);
+      // v10.5: 人物概率未計好就而家觸發（RAW 路徑唔經 afterImageReady，靠呢度補）
+      if (!personBusy && personSeq !== photoSeq) ensurePerson(false);
       // v6 管線：皮膚分區（白平衡＋美白＋磨皮） → 基本 → 顏色 → 細節 → 效果
-      if (skinOn && !skinAutoOff) {
+      if (skinOn && !skinAutoOff && skinSourceReady()) {
         var skin = getSkin(base, pvW, pvH, p.aiK);
         if (skin) {
           applySkin(base, skin, parseInt($("skinStrength").value, 10) / 100);
@@ -1307,7 +1581,7 @@
       if (skinAutoOff) {
         skinNote.textContent = "⚠️ 偵測唔到足夠皮膚（少過 0.1%），皮膚選區已自動停用。";
       } else {
-        skinNote.textContent = "自動偵測膚色（YCbCr），只將皮膚區拉向中性，藍色背景唔郁。如果偵測到皮膚少過 0.1%，會自動停用。";
+        skinNote.textContent = "AI 人物分割（PP-HumanSeg）＋膚色分析：先認人，再喺人物範圍入面揀皮膚，只將皮膚區拉向中性，背景唔郁。如果偵測到皮膚少過 0.1%，會自動停用。";
       }
     }
     skinBtn.addEventListener("click", function () {
@@ -2069,6 +2343,8 @@
       aiFull = null; aiPv = null;
       wb = null; updateWbUI();
       photoSeq++;
+      personProb = null; personSeq = -1; personFromAi = false; // v10.5: 新相要重計人物
+      ensurePerson(false);
       skinCache = null; skinCacheKey = "";
       skinOn = true; skinAutoOff = false; updateSkinUI();
       $("skinStrength").value = 70; $("skinStrengthVal").textContent = "70%";
@@ -2088,6 +2364,7 @@
     buildProGroups(); // v5: 生成專業調整面板
     updateCompare();
     loadModel();
+    loadSegModel(); // v10.5: 人物分割模型背景載入
     </script>
   </body>
 </html>
