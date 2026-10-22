@@ -209,6 +209,13 @@
       }
       .errbox.on { display: block; }
 
+      /* v10.6: 下載結果兜底區（顯示出圖俾 iOS 用戶長按儲存） */
+      .dlresult {
+        margin-top: 14px; background: #0e2a1a; border: 1px solid #2f7a4d; color: #d9ffe4;
+        border-radius: 10px; padding: 12px 14px; font-size: 14px; line-height: 1.7;
+      }
+      .dlresult img { display: block; max-width: 100%; border-radius: 8px; margin-top: 10px; }
+
       footer { margin-top: 26px; font-size: 12.5px; color: var(--ink-faint); line-height: 1.8; }
       .hidden { display: none !important; }
 
@@ -347,13 +354,17 @@
       </section>
 
       <div class="actions hidden" id="actions">
-        <button class="btn primary" id="downloadBtn" type="button">⬇ 下載還原圖（原尺寸 JPG）</button>
+        <button class="btn primary" id="downloadBtn" type="button">⬇ 下載還原圖（最高畫質 JPG）</button>
         <button class="btn" id="resetBtn" type="button">↺ 重置微調</button>
         <button class="btn" id="newPhotoBtn" type="button">換一張相</button>
       </div>
+      <div class="dlresult hidden" id="dlResult">
+        <div id="dlText"></div>
+        <img id="dlImg" alt="還原完成圖（可長按儲存）" />
+      </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.5 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.6 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -393,6 +404,8 @@
     var modelReady = false;
     var origImg = null;          // HTMLImageElement（原圖）
     var fullW = 0, fullH = 0;    // 原圖尺寸
+    var currentFileBase = "photo"; // v10.6: 原檔名（去副檔名），下載檔名用
+    var dlUrl = null;              // v10.6: 最近一次下載圖嘅 blob URL（下次先 revoke）
     // 全尺寸畫布
     var origFull = document.createElement("canvas");
     var aiFull = null;           // AI 結果（全尺寸畫布）；AI 未跑／失敗時為 null
@@ -601,6 +614,8 @@
     function handleFile(file) {
       if (!file) return;
       var name = file.name || "";
+      // v10.6: 記低原檔名做下載檔名（去副檔名＋清洗唔合法字元）
+      currentFileBase = (name.replace(/\.[^.]*$/, "").replace(/[\\/:*?"<>|]/g, "_").trim()) || "photo";
       if (isRawFile(name)) { decodeRAW(file); return; }   // v5: 相機 RAW
       if (isTiffFile(name)) { decodeTIFF(file); return; } // v5: TIFF
       if (file.type && file.type.indexOf("image/") !== 0) {
@@ -1621,52 +1636,135 @@
       requestRender();
     });
     $("newPhotoBtn").addEventListener("click", function () { fileInput.click(); });
-    $("downloadBtn").addEventListener("click", function () {
+    /* ===== v10.6 下載重寫 =====
+       死因背景（v10.5）：出檔尺寸 = 解碼全尺寸（RAW 全尺寸 7028×4688 = 32.9MP、
+       大 JPG 亦可 >20MP），直出 full-size canvas + 多份全尺寸 ImageData，
+       iOS WebKit 有約 16.7MP canvas 上限 + 記憶體上限（jetsam），真機上
+       toBlob 靜默失敗 / 成頁被殺 → 用戶見到「撳咗冇反應」。桌面無呢個上限，
+       所以 headless 測唔到。
+       修法：① 出檔像素封頂 DL_SAFE_PX（保守 16MP），超咗等比降級並明示；
+       ② RAW 下載直接 developRawSampled 到目標尺寸，唔經全尺寸中轉；
+       ③ JPEG 一律最高畫質 1.0；④ 出檔三段式：Web Share 存相 → a.download →
+       頁內顯示出圖俾長按儲存（iOS 點都存到）；⑤ 全程 try/catch + 進度文字。 */
+    var DL_SAFE_PX = 16000000;
+    var DL_BTN_LABEL = "⬇ 下載還原圖（最高畫質 JPG）";
+    function dlNextFrame() {
+      return new Promise(function (res) {
+        requestAnimationFrame(function () { setTimeout(res, 0); });
+      });
+    }
+    function dlBuildImageData(tw, th, pp, btn) {
+      // 喺 tw×th 砌「blend + 全管線」後嘅 ImageData
+      var out = document.createElement("canvas");
+      out.width = tw; out.height = th;
+      var octx = out.getContext("2d", { willReadFrequently: true });
+      if (!octx) throw new Error("開唔到出圖畫布");
+      var baseC;
+      if (rawMode && rawStore) {
+        // RAW：直接由 16-bit 數據開發到目標尺寸（含曝光），唔經全尺寸中轉
+        baseC = document.createElement("canvas");
+        baseC.width = tw; baseC.height = th;
+        baseC.getContext("2d").putImageData(developRawSampled(pp.exposure, tw, th), 0, 0);
+        pp.exposure = 0;
+      } else {
+        baseC = origFull;
+      }
+      var imgData = blendData(baseC, aiFull, tw, th, pp.aiK, octx);
+      // v10.6 防禦：lastBasePv 未就緒（未 render 過）就跳過皮膚段，唔好成個下載死喺度
+      if (skinOn && !skinAutoOff && lastBasePv) {
+        var dSkin = getSkin(lastBasePv, pvW, pvH, pp.aiK);
+        if (dSkin) {
+          applySkin(imgData, dSkin, parseInt($("skinStrength").value, 10) / 100);
+          var dMaskFull = resampleMask(dSkin.mask, dSkin.mw, dSkin.mh, tw, th);
+          if (pp.whiten > 0) applyWhiten(imgData, dMaskFull, pp.whiten);
+          if (pp.smoothSkin > 0) applySmooth(imgData, dMaskFull, pp.smoothSkin);
+        }
+      }
+      applyBasic(imgData, pp);
+      applyColor(imgData, pp);
+      applyDetail(imgData, pp);
+      applyEffects(imgData, pp);
+      octx.putImageData(imgData, 0, 0);
+      return out;
+    }
+    function dlToBlob(canvas) {
+      return new Promise(function (res) {
+        try { canvas.toBlob(function (b) { res(b); }, "image/jpeg", 1.0); }
+        catch (e) { res(null); }
+      });
+    }
+    $("downloadBtn").addEventListener("click", async function () {
       if (!origImg && !rawMode) return;
       var btn = this;
-      btn.disabled = true; btn.textContent = "⏳ 處理緊…";
-      setTimeout(function () {
-        try {
-          var p = getParams();
-          var out = document.createElement("canvas");
-          out.width = fullW; out.height = fullH;
-          var octx = out.getContext("2d", { willReadFrequently: true });
-          // v5: RAW 下載由 16-bit 全解像重新開發（含曝光）
-          var pp = p;
-          if (rawMode && rawStore) {
-            developRawFull(p.exposure);
-            pp = {}; for (var kk in p) pp[kk] = p[kk]; pp.exposure = 0;
-          }
-          var imgData = blendData(origFull, aiFull, fullW, fullH, pp.aiK, octx);
-          // v6 管線：皮膚分區（白平衡＋美白＋磨皮） → 基本 → 顏色 → 細節 → 效果
-          if (skinOn && !skinAutoOff) {
-            var dSkin = getSkin(lastBasePv, pvW, pvH, pp.aiK);
-            if (dSkin) {
-              applySkin(imgData, dSkin, parseInt($("skinStrength").value, 10) / 100);
-              var dMaskFull = resampleMask(dSkin.mask, dSkin.mw, dSkin.mh, fullW, fullH);
-              if (pp.whiten > 0) applyWhiten(imgData, dMaskFull, pp.whiten);
-              if (pp.smoothSkin > 0) applySmooth(imgData, dMaskFull, pp.smoothSkin);
-            }
-          }
-          applyBasic(imgData, pp);
-          applyColor(imgData, pp);
-          applyDetail(imgData, pp);
-          applyEffects(imgData, pp);
-          octx.putImageData(imgData, 0, 0);
-          out.toBlob(function (blob) {
-            btn.disabled = false; btn.textContent = "⬇ 下載還原圖（原尺寸 JPG）";
-            if (!blob) { showError("產生下載圖失敗，試下細啲嘅相。"); return; }
-            var a = document.createElement("a");
-            a.href = URL.createObjectURL(blob);
-            a.download = "水下還原.jpg";
-            document.body.appendChild(a); a.click(); a.remove();
-            setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
-          }, "image/jpeg", 0.92);
-        } catch (e) {
-          btn.disabled = false; btn.textContent = "⬇ 下載還原圖（原尺寸 JPG）";
-          showError("下載處理出錯：" + (e && e.message ? e.message : e));
+      btn.disabled = true;
+      clearError();
+      var dlBox = $("dlResult"), dlText = $("dlText"), dlImg = $("dlImg");
+      try {
+        // 目標尺寸：全尺寸，但總像素封頂（iOS canvas 上限）
+        var tw = fullW, th = fullH, scaled = false;
+        if (fullW * fullH > DL_SAFE_PX) {
+          var ds = Math.sqrt(DL_SAFE_PX / (fullW * fullH));
+          tw = Math.max(1, Math.floor(fullW * ds)); th = Math.max(1, Math.floor(fullH * ds));
+          scaled = true;
         }
-      }, 30);
+        btn.textContent = "⏳ 產生緊 " + tw + "×" + th + " 圖…";
+        await dlNextFrame();
+        var pp = getParams();
+        var out = dlBuildImageData(tw, th, pp, btn);
+        btn.textContent = "⏳ 編碼緊最高畫質 JPG…";
+        await dlNextFrame();
+        var blob = await dlToBlob(out);
+        if (!blob) {
+          // 編碼失敗（多數係尺寸/記憶體）：自動再降一級重試，唔好直接死
+          tw = Math.max(1, Math.floor(tw * 0.7)); th = Math.max(1, Math.floor(th * 0.7));
+          scaled = true;
+          btn.textContent = "⏳ 出圖失敗，降至 " + tw + "×" + th + " 再試…";
+          await dlNextFrame();
+          out = dlBuildImageData(tw, th, getParams(), btn);
+          blob = await dlToBlob(out);
+        }
+        out.width = 0; out.height = 0; // 釋放出圖畫布
+        if (!blob) {
+          showError("產生下載圖失敗：相片太大，部機記憶體唔夠。試下唔好勾「RAW 全尺寸解碼」，或者用細啲嘅相。");
+          return;
+        }
+        var fname = currentFileBase + "_restored.jpg";
+        var sizeMB = (blob.size / 1048576).toFixed(1);
+        var dimNote = tw + "×" + th + (scaled ? "（原圖 " + fullW + "×" + fullH + " 太大，已自動降至 iOS 出到嘅上限）" : "（原尺寸）");
+        // 兜底圖：無論邊條出檔路成功與否，都顯示出圖俾用戶長按儲存
+        if (dlUrl) URL.revokeObjectURL(dlUrl);
+        dlUrl = URL.createObjectURL(blob);
+        dlImg.src = dlUrl;
+        dlBox.classList.remove("hidden");
+        // 第 1 路：Web Share（iOS 分享表可直接「儲存影像」）
+        var shared = false, shareCancelled = false;
+        try {
+          var file = new File([blob], fname, { type: "image/jpeg" });
+          if (navigator.canShare && navigator.canShare({ files: [file] })) {
+            await navigator.share({ files: [file] });
+            shared = true;
+          }
+        } catch (se) {
+          if (se && se.name === "AbortError") shareCancelled = true;
+          // 其他錯誤（例如用戶手勢已過期 NotAllowedError）→ 落下一路
+        }
+        if (shared) {
+          dlText.textContent = "✅ 完成：" + fname + "（" + dimNote + " · JPEG 最高畫質 · " + sizeMB + " MB）已透過分享儲存。下面係同一張圖，亦可長按儲存。";
+        } else if (shareCancelled) {
+          dlText.textContent = "已取消分享。下面係完成圖（" + dimNote + " · JPEG 最高畫質 · " + sizeMB + " MB），長按圖片 →「儲存影像」即可存相。";
+        } else {
+          // 第 2 路：傳統 a.download
+          var a = document.createElement("a");
+          a.href = dlUrl; a.download = fname;
+          document.body.appendChild(a); a.click(); a.remove();
+          dlText.textContent = "✅ 完成：" + fname + "（" + dimNote + " · JPEG 最高畫質 · " + sizeMB + " MB）已開始下載。如果冇自動下載，長按下面張圖 →「儲存影像」存相。";
+        }
+        dlBox.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      } catch (e) {
+        showError("下載處理出錯：" + (e && e.message ? e.message : e) + "。試下唔好勾「RAW 全尺寸解碼」再下載。");
+      } finally {
+        btn.disabled = false; btn.textContent = DL_BTN_LABEL;
+      }
     });
 
     /* ============ 上傳事件 ============ */
