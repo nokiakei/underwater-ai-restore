@@ -353,7 +353,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.3 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.4 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -406,6 +406,14 @@
     var sampling = false;
     var comparePos = 0.5;        // 對比分隔線位置 0..1
     var renderQueued = false;
+    /* ============ v10.4: 拖動快速預覽（細解像度） ============ */
+    var FAST_MAX = 640;                 // 拖動時預覽最長邊；放手後全解像度補算
+    var fastW = 0, fastH = 0, fastReady = false;
+    var queuedFast = false, queuedFull = false, fullTimer = null;
+    var fastOrig = document.createElement("canvas");
+    var fastScratch = document.createElement("canvas");
+    var fastResult = document.createElement("canvas");
+    var fastAi = null, fastAiSrc = undefined; // fastAi 跟 aiPv 同步（換咗先重整）
     var photoSeq = 0;            // 每上傳一張相 +1，用嚟令皮膚快取失效
 
     /* ============ v4: 皮膚選區狀態 ============ */
@@ -515,6 +523,23 @@
       resultCanvas.width = pvW; resultCanvas.height = pvH;
       origCanvas.width = pvW; origCanvas.height = pvH;
       origCanvas.getContext("2d").drawImage(origPv, 0, 0);
+      buildFastCanvases();
+    }
+
+    // v10.4: 按預覽尺寸計細解像度 + 整 fastOrig（JPG/TIFF 路用；RAW 路 renderFast 會逐 frame 重新開發）
+    function buildFastCanvases() {
+      var s = Math.min(1, FAST_MAX / Math.max(pvW, pvH));
+      if (s >= 1) { fastReady = false; fastW = pvW; fastH = pvH; return; }
+      fastW = Math.max(1, Math.round(pvW * s));
+      fastH = Math.max(1, Math.round(pvH * s));
+      fastAiSrc = undefined; fastAi = null;
+      if (!rawMode) {
+        fastOrig.width = fastW; fastOrig.height = fastH;
+        var fx = fastOrig.getContext("2d");
+        fx.imageSmoothingEnabled = true; fx.imageSmoothingQuality = "high";
+        fx.drawImage(origPv, 0, 0, fastW, fastH);
+      }
+      fastReady = true;
     }
 
     /* ============ AI 推理 ============ */
@@ -1076,7 +1101,55 @@
     }
 
     var scratchPv = document.createElement("canvas");
-    function renderPreview() {
+    // v10.4: renderPreview 分流 — fast=true 行細解像度（拖動中），否則行全預覽解像度（原 v10.3 行為）
+    function renderPreview(fast) {
+      if (fast && fastReady) { renderFast(); return; }
+      renderFull();
+    }
+
+    // v10.4: 細解像度管線（同 renderFull 同一條管線、同一參數，只係解像度細）
+    // 唔郁 lastBasePv / origCanvas / 皮膚自動停用，嗰啲留返全解像度 render 負責。
+    function renderFast() {
+      var p = getParams();
+      var w = fastW, h = fastH;
+      if (rawMode && rawStore) {
+        var img = developRawSampled(p.exposure, w, h);
+        fastOrig.width = w; fastOrig.height = h;
+        fastOrig.getContext("2d").putImageData(img, 0, 0);
+        p.exposure = 0;
+      }
+      if (aiPv !== fastAiSrc) {
+        if (aiPv) {
+          if (!fastAi) fastAi = document.createElement("canvas");
+          fastAi.width = w; fastAi.height = h;
+          fastAi.getContext("2d").drawImage(aiPv, 0, 0, w, h);
+        } else fastAi = null;
+        fastAiSrc = aiPv;
+      }
+      fastScratch.width = w; fastScratch.height = h;
+      var sctx = fastScratch.getContext("2d", { willReadFrequently: true });
+      var base = blendData(fastOrig, fastAi, w, h, p.aiK, sctx);
+      if (skinOn && !skinAutoOff) {
+        var skin = getSkin(base, w, h, p.aiK);
+        if (skin) {
+          applySkin(base, skin, parseInt($("skinStrength").value, 10) / 100);
+          if (p.whiten > 0) applyWhiten(base, skin.mask, p.whiten);
+          if (p.smoothSkin > 0) applySmooth(base, skin.mask, p.smoothSkin);
+          if (skinMaskView) overlaySkinMask(base, skin.mask);
+        }
+      }
+      applyBasic(base, p);
+      applyColor(base, p);
+      applyDetail(base, p);
+      applyEffects(base, p);
+      fastResult.width = w; fastResult.height = h;
+      fastResult.getContext("2d").putImageData(base, 0, 0);
+      var rctx = resultCanvas.getContext("2d");
+      rctx.imageSmoothingEnabled = true;
+      rctx.drawImage(fastResult, 0, 0, pvW, pvH);
+    }
+
+    function renderFull() {
       if (!origImg && !rawMode) return;
       var p = getParams();
       // v5: RAW 嘅曝光由 16-bit 重新開發（唔經 8-bit 乘法）
@@ -1106,10 +1179,29 @@
       resultCanvas.getContext("2d").putImageData(base, 0, 0);
     }
 
-    function requestRender() {
-      if (renderQueued) return;
-      renderQueued = true;
-      requestAnimationFrame(function () { renderQueued = false; renderPreview(); });
+    function requestRender(fast) {
+      if (fast) {
+        scheduleFullRender();
+        if (renderQueued && queuedFull) return; // 已有全解像度排緊，唔使再排細圖
+        if (renderQueued) { queuedFast = true; return; }
+        renderQueued = true; queuedFast = true;
+        requestAnimationFrame(runQueuedRender);
+      } else {
+        if (fullTimer) { clearTimeout(fullTimer); fullTimer = null; }
+        if (renderQueued && queuedFull) return;
+        renderQueued = true; queuedFull = true; queuedFast = false;
+        requestAnimationFrame(runQueuedRender);
+      }
+    }
+    function runQueuedRender() {
+      var fast = queuedFast && !queuedFull;
+      renderQueued = false; queuedFast = false; queuedFull = false;
+      renderPreview(fast);
+    }
+    // 拖動停手 250ms 後自動補算一次全解像度（放手嘅 change 事件會即刻觸發，呢個係雙保險）
+    function scheduleFullRender() {
+      if (fullTimer) clearTimeout(fullTimer);
+      fullTimer = setTimeout(function () { fullTimer = null; requestRender(false); }, 250);
     }
 
     /* ============ 對比拖動 ============ */
@@ -1196,7 +1288,9 @@
     /* ============ 滑桿 ============ */
     function bindSlider(el, valEl, suffix) {
       var show = function () { valEl.textContent = el.value + suffix; };
-      el.addEventListener("input", function () { show(); requestRender(); });
+      // v10.4: 拖動中（input）行細解像度快速預覽；放手（change）即刻全解像度補算
+      el.addEventListener("input", function () { show(); requestRender(true); });
+      el.addEventListener("change", function () { requestRender(false); });
       show();
     }
     bindSlider(sliders.ai, $("aiStrengthVal"), "%");
@@ -1380,32 +1474,59 @@
     // 可分離 box blur（RGB，半徑 r），回傳 Float32Array
     function boxBlurR(src, w, h, r) {
       var n = w * h, tmp = new Float32Array(n * 3), out = new Float32Array(n * 3);
-      var x, y, xx, yy, c, acc, cnt;
-      for (y = 0; y < h; y++) for (x = 0; x < w; x++) for (c = 0; c < 3; c++) {
-        acc = 0; cnt = 0;
-        for (xx = x - r; xx <= x + r; xx++) { if (xx < 0 || xx >= w) continue; acc += src[(y * w + xx) * 3 + c]; cnt++; }
-        tmp[(y * w + x) * 3 + c] = acc / cnt;
-      }
-      for (y = 0; y < h; y++) for (x = 0; x < w; x++) for (c = 0; c < 3; c++) {
-        acc = 0; cnt = 0;
-        for (yy = y - r; yy <= y + r; yy++) { if (yy < 0 || yy >= h) continue; acc += tmp[(yy * w + x) * 3 + c]; cnt++; }
-        out[(y * w + x) * 3 + c] = acc / cnt;
+      var x, y, c, lo, hi, acc, base;
+      // v10.4: sliding-window（running sum），每像素 O(1)；同舊版「跳過出界、cnt 用實際數」
+      // 語義一致（水平 pass 再垂直 pass）。舊版每像素 O(r)，清晰 r=8 時慢好多倍。
+      for (c = 0; c < 3; c++) {
+        for (y = 0; y < h; y++) {
+          base = y * w * 3 + c;
+          acc = 0; hi = Math.min(w - 1, r);
+          for (x = 0; x <= hi; x++) acc += src[base + x * 3];
+          for (x = 0; x < w; x++) {
+            lo = Math.max(0, x - r); hi = Math.min(w - 1, x + r);
+            tmp[base + x * 3] = acc / (hi - lo + 1);
+            if (x + r + 1 < w) acc += src[base + (x + r + 1) * 3];
+            if (x - r >= 0) acc -= src[base + (x - r) * 3];
+          }
+        }
+        for (x = 0; x < w; x++) {
+          base = x * 3 + c;
+          acc = 0; hi = Math.min(h - 1, r);
+          for (y = 0; y <= hi; y++) acc += tmp[base + y * w * 3];
+          for (y = 0; y < h; y++) {
+            lo = Math.max(0, y - r); hi = Math.min(h - 1, y + r);
+            out[base + y * w * 3] = acc / (hi - lo + 1);
+            if (y + r + 1 < h) acc += tmp[base + (y + r + 1) * w * 3];
+            if (y - r >= 0) acc -= tmp[base + (y - r) * w * 3];
+          }
+        }
       }
       return out;
     }
-    // 單通道 box blur
+    // 單通道 box blur（v10.4: 同上，sliding-window）
     function boxBlur1(src, w, h, r) {
       var n = w * h, tmp = new Float32Array(n), out = new Float32Array(n);
-      var x, y, xx, yy, acc, cnt;
-      for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
-        acc = 0; cnt = 0;
-        for (xx = x - r; xx <= x + r; xx++) { if (xx < 0 || xx >= w) continue; acc += src[y * w + xx]; cnt++; }
-        tmp[y * w + x] = acc / cnt;
+      var x, y, lo, hi, acc, base;
+      for (y = 0; y < h; y++) {
+        base = y * w;
+        acc = 0; hi = Math.min(w - 1, r);
+        for (x = 0; x <= hi; x++) acc += src[base + x];
+        for (x = 0; x < w; x++) {
+          lo = Math.max(0, x - r); hi = Math.min(w - 1, x + r);
+          tmp[base + x] = acc / (hi - lo + 1);
+          if (x + r + 1 < w) acc += src[base + x + r + 1];
+          if (x - r >= 0) acc -= src[base + x - r];
+        }
       }
-      for (y = 0; y < h; y++) for (x = 0; x < w; x++) {
-        acc = 0; cnt = 0;
-        for (yy = y - r; yy <= y + r; yy++) { if (yy < 0 || yy >= h) continue; acc += tmp[yy * w + x]; cnt++; }
-        out[y * w + x] = acc / cnt;
+      for (x = 0; x < w; x++) {
+        acc = 0; hi = Math.min(h - 1, r);
+        for (y = 0; y <= hi; y++) acc += tmp[y * w + x];
+        for (y = 0; y < h; y++) {
+          lo = Math.max(0, y - r); hi = Math.min(h - 1, y + r);
+          out[y * w + x] = acc / (hi - lo + 1);
+          if (y + r + 1 < h) acc += tmp[(y + r + 1) * w + x];
+          if (y - r >= 0) acc -= tmp[(y - r) * w + x];
+        }
       }
       return out;
     }
@@ -1757,6 +1878,7 @@
       resultCanvas.width = pvW; resultCanvas.height = pvH;
       origCanvas.width = pvW; origCanvas.height = pvH;
       developRawPreview(ev);
+      buildFastCanvases(); // v10.4: RAW 預覽尺寸落實後整返細解像度設定
     }
     /* v10: 引擎載入改由 raw16/index.js 嘅 module worker 負責（wasm 分塊喺 worker 內拼合），
        舊主線程引擎載入函數已移除。 */
