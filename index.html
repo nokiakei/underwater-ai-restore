@@ -200,6 +200,17 @@
       .note { font-size: 12.5px; color: var(--ink-faint); line-height: 1.7; padding-bottom: 12px; }
 
       .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+      /* v10.9: 導出分級選擇 */
+      .dltiers { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; margin-bottom: 2px; }
+      .dltier {
+        display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+        border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px;
+        font-size: 13.5px; background: var(--bg-2); color: var(--ink);
+      }
+      .dltier small { color: var(--ink-faint); font-size: 12px; }
+      .dltier:has(input:checked) { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+      .dltier:has(input:checked) small { color: var(--accent-ink); opacity: .75; }
+      .dltier input { accent-color: var(--accent-ink); margin: 0; }
       .actions .btn { padding: 12px 20px; font-size: 15px; }
 
       .errbox {
@@ -355,7 +366,11 @@
       </section>
 
       <div class="actions hidden" id="actions">
-        <button class="btn primary" id="downloadBtn" type="button">⬇ 下載還原圖（最高畫質 JPG）</button>
+        <div class="dltiers" role="radiogroup" aria-label="導出畫質">
+          <label class="dltier"><input type="radio" name="dlTier" value="mobile" checked /> 📱 手機高清 <small>2400px・快・唔易爆記憶體</small></label>
+          <label class="dltier"><input type="radio" name="dlTier" value="max" /> 🖼 最高畫質 <small>原尺寸・檔大・較慢</small></label>
+        </div>
+        <button class="btn primary" id="downloadBtn" type="button">⬇ 導出相片（手機高清）</button>
         <button class="btn" id="resetBtn" type="button">↺ 重置微調</button>
         <button class="btn" id="newPhotoBtn" type="button">換一張相</button>
       </div>
@@ -365,7 +380,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.8 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.9 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -617,6 +632,7 @@
     /* ============ 上傳 ============ */
     function handleFile(file) {
       if (!file) return;
+      dlCacheDrop(); // v10.9: 換相即丟舊緩存
       var name = file.name || "";
       // v10.6: 記低原檔名做下載檔名（去副檔名＋清洗唔合法字元）
       currentFileBase = (name.replace(/\.[^.]*$/, "").replace(/[\\/:*?"<>|]/g, "_").trim()) || "photo";
@@ -1195,6 +1211,21 @@
       return out;
     }
 
+    // v10.9: mask 逐行重採樣（公式同 resampleMask 逐點一致），分條導出用
+    function resampleMaskRows(mask, mw, mh, w, h, y0, rows) {
+      var out = new Float32Array(w * rows);
+      var x, ly, y;
+      for (ly = 0; ly < rows; ly++) {
+        y = y0 + ly;
+        var my = Math.min(mh - 1, Math.round(y * mh / h));
+        for (x = 0; x < w; x++) {
+          var mx = Math.min(mw - 1, Math.round(x * mw / w));
+          out[ly * w + x] = mask[my * mw + mx];
+        }
+      }
+      return out;
+    }
+
     // v10.5: 檢測來源就緒未 — 人物模型仲載緊/計緊嗰陣唔好行舊檢測住：
     // 舊檢測喺未還原嘅原圖上會誤觸「<0.1% 自動停用」，等人物概率到咗都翻唔返生。
     function skinSourceReady() {
@@ -1435,15 +1466,16 @@
       }
     }
     // 皮膚區 R 通道乘 skinK（只郁 R，唔郁 G/B）；strength 0..1
-    function applySkin(imgData, skin, strength) {
+    function applySkin(imgData, skin, strength, yOff, fullH) {
       if (!skin || strength <= 0) return imgData;
       var d = imgData.data, w = imgData.width, h = imgData.height;
+      var yo = yOff || 0, fh = fullH || h; // v10.9: 分條導出傳入絕對行號
       var mask = skin.mask, mw = skin.mw, mh = skin.mh;
       var kk = 1 + (skin.k - 1) * strength;
       if (Math.abs(kk - 1) < 0.0005) return imgData;
       var x, y, mx, my, m, i, f;
       for (y = 0; y < h; y++) {
-        my = Math.min(mh - 1, Math.round(y * mh / h));
+        my = Math.min(mh - 1, Math.round((yo + y) * mh / fh));
         for (x = 0; x < w; x++) {
           mx = Math.min(mw - 1, Math.round(x * mw / w));
           m = mask[my * mw + mx];
@@ -1573,6 +1605,7 @@
     }
 
     function requestRender(fast) {
+      dlCacheDrop(); // v10.9: 任何調整都作廢導出緩存（函數喺下載段定義，宣告會 hoist）
       if (fast) {
         scheduleFullRender();
         if (renderQueued && queuedFull) return; // 已有全解像度排緊，唔使再排細圖
@@ -1590,6 +1623,7 @@
       var fast = queuedFast && !queuedFull;
       renderQueued = false; queuedFast = false; queuedFull = false;
       renderPreview(fast);
+      if (!fast) dlScheduleIdleCache(); // v10.9: 全解像 render 完成 → 1.5 秒後背景預備導出圖
     }
     // 拖動停手 250ms 後自動補算一次全解像度（放手嘅 change 事件會即刻觸發，呢個係雙保險）
     function scheduleFullRender() {
@@ -1740,144 +1774,410 @@
       requestRender();
     });
     $("newPhotoBtn").addEventListener("click", function () { fileInput.click(); });
-    /* ===== v10.6 下載重寫 =====
-       死因背景（v10.5）：出檔尺寸 = 解碼全尺寸（RAW 全尺寸 7028×4688 = 32.9MP、
-       大 JPG 亦可 >20MP），直出 full-size canvas + 多份全尺寸 ImageData，
-       iOS WebKit 有約 16.7MP canvas 上限 + 記憶體上限（jetsam），真機上
-       toBlob 靜默失敗 / 成頁被殺 → 用戶見到「撳咗冇反應」。桌面無呢個上限，
-       所以 headless 測唔到。
-       修法：① 出檔像素封頂 DL_SAFE_PX（保守 16MP），超咗等比降級並明示；
-       ② RAW 下載直接 developRawSampled 到目標尺寸，唔經全尺寸中轉；
-       ③ JPEG 一律最高畫質 1.0；④ 出檔三段式：Web Share 存相 → a.download →
-       頁內顯示出圖俾長按儲存（iOS 點都存到）；⑤ 全程 try/catch + 進度文字。 */
+    /* ===== v10.9 導出重寫：分級＋分條渲染＋緩存預備 =====
+       背景（v10.8 真機）：導入、修圖正常，一撳導出成頁跳返導入畫面——iOS
+       jetsam 殺頁重載。盤點 v10.8 導出嗰刻同時存在嘅全尺寸 buffer（16MP
+       導出、RAW 全尺寸來源計）：rawStore 395MB（全尺寸 Float32 解碼）＋
+       origFull/aiFull/rawFullCanvas 各 132MB＋成品畫布 64MB＋RAW baseC 64MB
+       ＋合併層（buildChromaAiPv 喺 12.5MP 開 Y/cbR/crR/cbS/crS/ws 六個
+       Float32 陣列 ≈300MB，連 aiScaled/aiD/origD/成品 ImageData ≈450MB）＋
+       blend ImageData 64MB＋全尺寸 mask Float32 64MB＋applyDetail 嘅 f 同
+       三個 blur 結果（每個 192MB）＋applySmooth sx 192MB——總峰值輕易過
+       1.2GB（大 JPG 來源亦過 1GB），爆 iOS 每頁記憶體上限。
+       v10.9 修法：
+       ① 分級：手機高清（預設，最長邊 ≤2400、JPEG 0.95，手機睇/分享同最高
+          畫質肉眼無分別）／最高畫質（原尺寸封頂 16MP、JPEG 1.0）；
+       ② 分條渲染：成條導出管線逐段（256 行＋16 行 halo）計，段 buffer
+          即用即棄；色度合併改三段逐段計（統計→增益→成圖），唔再開全尺寸
+          中間陣列；導出期間暫放 aiFull（有 aiRawOut 時）同 RAW 嘅
+          origFull/rawFullCanvas，完咗（finally）重建。峰值 ≈ 來源＋成品
+          ＋約 120MB 段工作區；
+       ③ 緩存預備：全解像 render 後停手 1.5 秒，背景（idle）預計好手機
+          高清成品；任何調整經 requestRender 即作廢；撳導出命中緩存就
+          直接編碼；
+       ④ 導出鎖 UI＋逐段進度；出檔三段式（share→a.download→長按圖）沿用
+          v10.6；JPEG 畫質跟級別（手機 0.95／最高 1.0）。 */
     var DL_SAFE_PX = 16000000;
-    var DL_BTN_LABEL = "⬇ 下載還原圖（最高畫質 JPG）";
+    var DL_STRIP = 256, DL_HALO = 16;
+    var dlBusy = false;
     function dlNextFrame() {
       return new Promise(function (res) {
         requestAnimationFrame(function () { setTimeout(res, 0); });
       });
     }
-    function dlBuildImageData(tw, th, pp, btn) {
-      // 喺 tw×th 砌「blend + 全管線」後嘅 ImageData
+    /* ---------- 分級 ---------- */
+    function dlTier() {
+      var r = document.querySelector('input[name="dlTier"]:checked');
+      return r ? r.value : "mobile";
+    }
+    function dlTierName(t) { return t === "max" ? "最高畫質" : "手機高清"; }
+    function dlBtnLabel() { return "⬇ 導出相片（" + dlTierName(dlTier()) + "）"; }
+    function dlTierDims(t) {
+      var tw = fullW, th = fullH, scaled = false;
+      if (t === "mobile") {
+        var sc = Math.min(1, 2400 / Math.max(fullW, fullH));
+        tw = Math.max(1, Math.round(fullW * sc));
+        th = Math.max(1, Math.round(fullH * sc));
+      } else if (tw * th > DL_SAFE_PX) {
+        var ds = Math.sqrt(DL_SAFE_PX / (tw * th));
+        tw = Math.max(1, Math.floor(fullW * ds));
+        th = Math.max(1, Math.floor(fullH * ds));
+        scaled = true;
+      }
+      return { tw: tw, th: th, scaled: scaled };
+    }
+    /* ---------- 分條小工具 ---------- */
+    // 由來源畫布抽目標尺寸 [ey0,ey1) 行做細畫布（比例映射，blend/合併共用）
+    function dlStripCanvas(src, tw, th, ey0, ey1) {
+      var c = document.createElement("canvas");
+      c.width = tw; c.height = ey1 - ey0;
+      var ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+      var sy = ey0 * src.height / th, sh2 = (ey1 - ey0) * src.height / th;
+      ctx.drawImage(src, 0, sy, src.width, sh2, 0, 0, tw, ey1 - ey0);
+      return c;
+    }
+    function dlBaseStrip(pp, tw, th, ey0, ey1) {
+      if (rawMode && rawStore) {
+        var c = document.createElement("canvas");
+        c.width = tw; c.height = ey1 - ey0;
+        c.getContext("2d").putImageData(developRawSampledRows(pp._rawEv, tw, th, ey0, ey1 - ey0), 0, 0);
+        return c;
+      }
+      return dlStripCanvas(origFull, tw, th, ey0, ey1);
+    }
+    /* ---------- 分條色度合併（數學同 buildChromaAiPv 逐點對應） ---------- */
+    function dlMergeCore(aiD, lumaD, tw, rows) {
+      var n = tw * rows;
+      var Y = new Float32Array(n), cbR = new Float32Array(n), crR = new Float32Array(n);
+      var i, r1, g1, b1, r2, g2, b2;
+      for (i = 0; i < n; i++) {
+        r1 = lumaD[i * 4] / 255; g1 = lumaD[i * 4 + 1] / 255; b1 = lumaD[i * 4 + 2] / 255;
+        r2 = aiD[i * 4] / 255; g2 = aiD[i * 4 + 1] / 255; b2 = aiD[i * 4 + 2] / 255;
+        Y[i] = 0.299 * r1 + 0.587 * g1 + 0.114 * b1;
+        cbR[i] = -0.168736 * r2 - 0.331264 * g2 + 0.5 * b2 + 0.5;
+        crR[i] = 0.5 * r2 - 0.418688 * g2 - 0.081312 * b2 + 0.5;
+      }
+      var cbS = new Float32Array(n), crS = new Float32Array(n), ws = new Float32Array(n);
+      var gr = 2, sigma = 0.08, sg2 = 2 * sigma * sigma;
+      var dx, dy, x, y, xx, yy, idx, o, dY, wt;
+      for (dy = -gr; dy <= gr; dy++) {
+        for (dx = -gr; dx <= gr; dx++) {
+          for (y = 0; y < rows; y++) {
+            yy = y + dy; if (yy < 0) yy = 0; if (yy >= rows) yy = rows - 1;
+            for (x = 0; x < tw; x++) {
+              xx = x + dx; if (xx < 0) xx = 0; if (xx >= tw) xx = tw - 1;
+              idx = yy * tw + xx; o = y * tw + x;
+              dY = Y[idx] - Y[o];
+              wt = Math.exp(-(dY * dY) / sg2);
+              cbS[o] += cbR[idx] * wt; crS[o] += crR[idx] * wt; ws[o] += wt;
+            }
+          }
+        }
+      }
+      for (i = 0; i < n; i++) { cbS[i] /= ws[i]; crS[i] /= ws[i]; }
+      return { Y: Y, cbS: cbS, crS: crS };
+    }
+    // 兩遍逐段統計：pass A 出全圖 R/G/B 總和→自適應增益；pass B 出增益後 R/B
+    // 總和→暗相提亮 lift。公式同 buildChromaAiPv 第 5/6 步逐項對應。
+    async function dlMergeGains(pp, tw, th, progress) {
+      var n = tw * th;
+      var sumR = 0, sumG = 0, sumB = 0, sR2 = 0, sB2 = 0;
+      var rGain = 1, bGain = 1;
+      for (var pass = 0; pass < 2; pass++) {
+        for (var y0 = 0; y0 < th; y0 += DL_STRIP) {
+          var y1 = Math.min(th, y0 + DL_STRIP);
+          var ey0 = Math.max(0, y0 - DL_HALO), ey1 = Math.min(th, y1 + DL_HALO);
+          var rows = ey1 - ey0;
+          var baseC = dlBaseStrip(pp, tw, th, ey0, ey1);
+          var aiC = dlStripCanvas(aiRawOut, tw, th, ey0, ey1);
+          var lumaD = baseC.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, tw, rows).data;
+          var aiD = aiC.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, tw, rows).data;
+          var core = dlMergeCore(aiD, lumaD, tw, rows);
+          var kTop = y0 - ey0, kBot = kTop + (y1 - y0);
+          for (var yy2 = kTop; yy2 < kBot; yy2++) {
+            for (var xx2 = 0; xx2 < tw; xx2++) {
+              var i = yy2 * tw + xx2;
+              var Yv = core.Y[i], cb = core.cbS[i], cr = core.crS[i];
+              var rr = Yv + 1.402 * (cr - 0.5);
+              var gg = Yv - 0.344136 * (cb - 0.5) - 0.714136 * (cr - 0.5);
+              var bb = Yv + 1.772 * (cb - 0.5);
+              rr = Math.min(1, Math.max(0, rr)); gg = Math.min(1, Math.max(0, gg)); bb = Math.min(1, Math.max(0, bb));
+              if (pass === 0) { sumR += rr; sumG += gg; sumB += bb; }
+              else {
+                sR2 += Math.round(Math.min(255, Math.round(rr * 255) * rGain));
+                sB2 += Math.round(Math.min(255, Math.round(bb * 255) * bGain));
+              }
+            }
+          }
+          if (progress) progress("準備顏色層（" + (pass + 1) + "/2）");
+          await dlNextFrame();
+        }
+        if (pass === 0) {
+          var rg = sumR / Math.max(sumG, 1e-6), bg = sumB / Math.max(sumG, 1e-6);
+          rGain = Math.min(2.4, Math.max(0.75, 0.82 / rg));
+          bGain = Math.min(1.35, Math.max(0.55, 1.12 / bg));
+        }
+      }
+      var lift = 1;
+      var meanY2 = (0.299 * sR2 + 0.587 * (sumG * 255) + 0.114 * sB2) / n;
+      if (meanY2 > 0 && meanY2 < 115) {
+        var lf = Math.min(1.5, 115 / meanY2);
+        if (lf > 1.01) lift = lf;
+      }
+      return { rGain: rGain, bGain: bGain, lift: lift };
+    }
+    function dlMergeStrip(aiD, lumaD, tw, rows, gains) {
+      var core = dlMergeCore(aiD, lumaD, tw, rows);
+      var out = new ImageData(tw, rows), px = out.data;
+      var doGain = (gains.rGain < 0.999 || gains.rGain > 1.001 || gains.bGain < 0.999 || gains.bGain > 1.001);
+      for (var i = 0; i < tw * rows; i++) {
+        var Yv = core.Y[i], cb = core.cbS[i], cr = core.crS[i];
+        var rr = Yv + 1.402 * (cr - 0.5);
+        var gg = Yv - 0.344136 * (cb - 0.5) - 0.714136 * (cr - 0.5);
+        var bb = Yv + 1.772 * (cb - 0.5);
+        rr = Math.min(1, Math.max(0, rr)); gg = Math.min(1, Math.max(0, gg)); bb = Math.min(1, Math.max(0, bb));
+        var r8 = Math.round(rr * 255), g8 = Math.round(gg * 255), b8 = Math.round(bb * 255);
+        if (doGain) { r8 = Math.min(255, r8 * gains.rGain); b8 = Math.min(255, b8 * gains.bGain); }
+        if (gains.lift > 1) {
+          r8 = Math.min(255, r8 * gains.lift);
+          g8 = Math.min(255, g8 * gains.lift);
+          b8 = Math.min(255, b8 * gains.lift);
+        }
+        px[i * 4] = r8; px[i * 4 + 1] = g8; px[i * 4 + 2] = b8; px[i * 4 + 3] = 255;
+      }
+      return out;
+    }
+    /* ---------- 分條主流程：blend＋皮膚＋基本＋顏色＋細節＋效果，逐段入成品畫布 ---------- */
+    async function dlBuildStriped(tw, th, pp, progress) {
       var out = document.createElement("canvas");
       out.width = tw; out.height = th;
       var octx = out.getContext("2d", { willReadFrequently: true });
       if (!octx) throw new Error("開唔到出圖畫布");
-      var baseC;
-      if (rawMode && rawStore) {
-        // RAW：直接由 16-bit 數據開發到目標尺寸（含曝光），唔經全尺寸中轉
-        baseC = document.createElement("canvas");
-        baseC.width = tw; baseC.height = th;
-        baseC.getContext("2d").putImageData(developRawSampled(pp.exposure, tw, th), 0, 0);
-        pp.exposure = 0;
-      } else {
-        baseC = origFull;
+      pp._rawEv = pp.exposure;
+      // 皮膚遮罩來源：同 v10.8 一致（預覽 base 上計一次，逐段重採樣）
+      var dSkin = null, dMaskSrc = null;
+      if (lastBasePv) {
+        if (skinOn && !skinAutoOff) dSkin = getSkin(lastBasePv, pvW, pvH, pp.aiK);
+        if (dSkin) {
+          dMaskSrc = { mask: dSkin.mask, mw: dSkin.mw, mh: dSkin.mh };
+        } else if (pp.whiten > 0 || pp.smoothSkin > 0) {
+          var dEm = effectiveSkinMask(lastBasePv, pvW, pvH, pp.aiK);
+          if (dEm) dMaskSrc = { mask: dEm.mask, mw: pvW, mh: pvH };
+        }
       }
-      // v10.8：下載 AI 層同預覽完全睇齊——用色度合併層（AI 色＋底圖亮度＋自適應色調），
-      // 唔再用 aiFull（AI 原始輸出直放大、冇合併冇色調修正）。
-      // 實測 v10.7：下載 B/G 比預覽高 0.11、逐像素平均差 26.8——望住預覽調好、
-      // 下載出嚟變返藍，係用戶「成站色調都錯」嘅主因之一。
-      // 合併最多喺約 12.5MP 內做；再大就縮細合併再放大（色度屬低頻，影響細），
-      // RAW 底圖係按今次曝光開發，合併亮度源即係曝光後底圖，曝光反映保持正確。
-      var aiSrcDl = aiFull;
-      if (aiRawOut && pp.aiK > 0) {
+      var skinStrength = parseInt($("skinStrength").value, 10) / 100;
+      // AI 色度合併層：同 v10.8 一致——合併最多喺約 12.5MP 內做（再大就
+      // 縮細合併再放大，色度屬低頻）；但改用分條計，唔開全尺寸中間陣列。
+      // 先逐段統計增益，再逐段砌好成張合併層（失敗就跌返 aiFull 直用）。
+      var useMerge = !!(aiRawOut && pp.aiK > 0), gains = null, mergedC = null;
+      if (useMerge) {
         try {
           var mSc = Math.min(1, Math.sqrt(12500000 / (tw * th)));
           var mw2 = Math.max(8, Math.round(tw * mSc)), mh2 = Math.max(8, Math.round(th * mSc));
-          // 亮度源畫布要啱啱好 mw2×mh2：一律 drawImage 縮放（getImageData 對大畫布係裁切，會出事）
-          var lumaDl = document.createElement("canvas");
-          lumaDl.width = mw2; lumaDl.height = mh2;
-          var lctx2 = lumaDl.getContext("2d");
-          lctx2.imageSmoothingEnabled = true; lctx2.imageSmoothingQuality = "high";
-          lctx2.drawImage(baseC, 0, 0, mw2, mh2);
-          var mergedDl = buildChromaAiPv(aiRawOut, mw2, mh2, lumaDl);
-          if (mergedDl) {
-            if (mw2 === tw && mh2 === th) { aiSrcDl = mergedDl; }
-            else {
-              var upDl = document.createElement("canvas");
-              upDl.width = tw; upDl.height = th;
-              var uctx2 = upDl.getContext("2d");
-              uctx2.imageSmoothingEnabled = true; uctx2.imageSmoothingQuality = "high";
-              uctx2.drawImage(mergedDl, 0, 0, tw, th);
-              aiSrcDl = upDl;
-            }
+          gains = await dlMergeGains(pp, mw2, mh2, progress);
+          mergedC = document.createElement("canvas");
+          mergedC.width = mw2; mergedC.height = mh2;
+          var mctx = mergedC.getContext("2d", { willReadFrequently: true });
+          for (var my0 = 0; my0 < mh2; my0 += DL_STRIP) {
+            var my1 = Math.min(mh2, my0 + DL_STRIP);
+            var mey0 = Math.max(0, my0 - DL_HALO), mey1 = Math.min(mh2, my1 + DL_HALO);
+            var mrows = mey1 - mey0;
+            var mBase = dlBaseStrip(pp, mw2, mh2, mey0, mey1);
+            var mLuma = mBase.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, mw2, mrows).data;
+            var mAiC = dlStripCanvas(aiRawOut, mw2, mh2, mey0, mey1);
+            var mAiD = mAiC.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, mw2, mrows).data;
+            mctx.putImageData(dlMergeStrip(mAiD, mLuma, mw2, mrows, gains), 0, mey0, 0, my0 - mey0, mw2, my1 - my0);
+            if (progress) progress("砌合併層 " + Math.min(mh2, my1) + "/" + mh2 + " 行");
+            await dlNextFrame();
           }
-        } catch (eDl) { aiSrcDl = aiFull; }
+        } catch (eG) { useMerge = false; gains = null; mergedC = null; }
       }
-      var imgData = blendData(baseC, aiSrcDl, tw, th, pp.aiK, octx);
-      // v10.6 防禦：lastBasePv 未就緒（未 render 過）就跳過皮膚段，唔好成個下載死喺度
-      // v10.7：同預覽睇齊——applySkin 跟皮膚開關；美白/磨皮獨立攞遮罩（皮膚優先、人物後備）
-      if (lastBasePv) {
-        var dMaskFull = null;
-        var dSkin = (skinOn && !skinAutoOff) ? getSkin(lastBasePv, pvW, pvH, pp.aiK) : null;
-        if (dSkin) {
-          applySkin(imgData, dSkin, parseInt($("skinStrength").value, 10) / 100);
-          dMaskFull = resampleMask(dSkin.mask, dSkin.mw, dSkin.mh, tw, th);
-        } else if (pp.whiten > 0 || pp.smoothSkin > 0) {
-          var dEm = effectiveSkinMask(lastBasePv, pvW, pvH, pp.aiK);
-          if (dEm) dMaskFull = resampleMask(dEm.mask, pvW, pvH, tw, th);
+      var blendC = document.createElement("canvas");
+      var bctx = blendC.getContext("2d", { willReadFrequently: true });
+      var total = Math.ceil(th / DL_STRIP), done = 0;
+      for (var y0 = 0; y0 < th; y0 += DL_STRIP) {
+        var y1 = Math.min(th, y0 + DL_STRIP);
+        var ey0 = Math.max(0, y0 - DL_HALO), ey1 = Math.min(th, y1 + DL_HALO);
+        var rows = ey1 - ey0;
+        var baseC = dlBaseStrip(pp, tw, th, ey0, ey1);
+        var aiC = null;
+        if (pp.aiK > 0 && useMerge && mergedC) {
+          aiC = dlStripCanvas(mergedC, tw, th, ey0, ey1);
+        } else if (pp.aiK > 0 && aiFull) {
+          aiC = dlStripCanvas(aiFull, tw, th, ey0, ey1);
         }
-        if (dMaskFull) {
-          if (pp.whiten > 0) applyWhiten(imgData, dMaskFull, pp.whiten);
-          if (pp.smoothSkin > 0) applySmooth(imgData, dMaskFull, pp.smoothSkin);
+        blendC.width = tw; blendC.height = rows;
+        var imgData = blendData(baseC, aiC, tw, rows, pp.aiK, bctx);
+        if (dSkin) applySkin(imgData, dSkin, skinStrength, ey0, th);
+        if (dMaskSrc && (pp.whiten > 0 || pp.smoothSkin > 0)) {
+          var mStrip = resampleMaskRows(dMaskSrc.mask, dMaskSrc.mw, dMaskSrc.mh, tw, th, ey0, rows);
+          if (pp.whiten > 0) applyWhiten(imgData, mStrip, pp.whiten);
+          if (pp.smoothSkin > 0) applySmooth(imgData, mStrip, pp.smoothSkin);
         }
+        applyBasic(imgData, pp);
+        applyColor(imgData, pp);
+        applyDetail(imgData, pp);
+        applyEffects(imgData, pp, ey0, th);
+        octx.putImageData(imgData, 0, ey0, 0, y0 - ey0, tw, y1 - y0);
+        done++;
+        if (progress) progress("第 " + done + "/" + total + " 段");
+        await dlNextFrame();
       }
-      applyBasic(imgData, pp);
-      applyColor(imgData, pp);
-      applyDetail(imgData, pp);
-      applyEffects(imgData, pp);
-      octx.putImageData(imgData, 0, 0);
       return out;
     }
-    function dlToBlob(canvas) {
+    /* ---------- 緩存預備（手機高清級） ---------- */
+    var dlCache = { key: "", canvas: null, promise: null };
+    var dlIdleTimer = null;
+    function dlCacheKey(tw, th, pp) {
+      var wbS = wb ? (wb.r + "," + wb.g + "," + wb.b) : "";
+      return [photoSeq, tw + "x" + th, JSON.stringify(pp),
+        $("skinStrength") ? $("skinStrength").value : "",
+        skinOn ? 1 : 0, skinAutoOff ? 1 : 0, wbS,
+        skinCacheKey, gateMaskKey, personSeq, aiPvEv || ""].join("|");
+    }
+    function dlCacheDrop() {
+      if (typeof dlCache === "undefined" || !dlCache) return;
+      if (dlCache.canvas) { try { dlCache.canvas.width = 0; dlCache.canvas.height = 0; } catch (e) {} }
+      dlCache.key = ""; dlCache.canvas = null; dlCache.promise = null;
+      if (dlIdleTimer) { clearTimeout(dlIdleTimer); dlIdleTimer = null; }
+    }
+    function dlScheduleIdleCache() {
+      if (dlIdleTimer) clearTimeout(dlIdleTimer);
+      if (!origImg && !rawMode) return;
+      dlIdleTimer = setTimeout(function () {
+        dlIdleTimer = null;
+        if (dlBusy) return;
+        if (window.requestIdleCallback) {
+          requestIdleCallback(function () { dlCacheEnsure(); }, { timeout: 2500 });
+        } else { dlCacheEnsure(); }
+      }, 1500);
+    }
+    function dlCacheEnsure() {
+      if (dlBusy || (!origImg && !rawMode)) return;
+      var dims = dlTierDims("mobile");
+      var pp = getParams();
+      var key = dlCacheKey(dims.tw, dims.th, pp);
+      if (dlCache.key === key && (dlCache.canvas || dlCache.promise)) return;
+      var promise = dlBuildStriped(dims.tw, dims.th, pp, null).then(function (cv) {
+        if (dlCache.key === key && dlCache.promise === promise) {
+          dlCache.canvas = cv; dlCache.promise = null;
+        } else {
+          try { cv.width = 0; cv.height = 0; } catch (e) {}
+        }
+        return cv;
+      }).catch(function () {
+        if (dlCache.key === key) dlCache.promise = null;
+        return null;
+      });
+      dlCache.key = key; dlCache.canvas = null; dlCache.promise = promise;
+    }
+    /* ---------- 導出期間暫放大畫布（完咗重建） ---------- */
+    function dlReleaseBig() {
+      var rel = { ai: false, raw: false };
+      try {
+        if (aiFull && aiRawOut) { aiFull.width = 0; aiFull.height = 0; rel.ai = true; }
+        if (rawMode && rawStore) {
+          if (origFull) { origFull.width = 0; origFull.height = 0; }
+          if (rawFullCanvas) { rawFullCanvas.width = 0; rawFullCanvas.height = 0; }
+          rel.raw = true;
+        }
+      } catch (e) {}
+      return rel;
+    }
+    function dlRebuildBig(rel) {
+      try {
+        if (rel.ai && aiRawOut && aiFull) {
+          aiFull.width = fullW; aiFull.height = fullH;
+          var afctx = aiFull.getContext("2d");
+          afctx.imageSmoothingEnabled = true; afctx.imageSmoothingQuality = "high";
+          afctx.drawImage(aiRawOut, 0, 0, fullW, fullH);
+        }
+        if (rel.raw && rawStore) { developRawFull(0); requestRender(false); }
+      } catch (e) { /* 重建失敗唔好蓋過導出結果；換相會再重建 */ }
+    }
+    function dlSetLock(on) {
+      dlBusy = on;
+      if (controls) {
+        controls.style.pointerEvents = on ? "none" : "";
+        controls.style.opacity = on ? "0.55" : "";
+      }
+      var radios = document.querySelectorAll('input[name="dlTier"]');
+      for (var i = 0; i < radios.length; i++) radios[i].disabled = on;
+    }
+    function dlToBlob(canvas, q) {
       return new Promise(function (res) {
-        try { canvas.toBlob(function (b) { res(b); }, "image/jpeg", 1.0); }
+        try { canvas.toBlob(function (b) { res(b); }, "image/jpeg", q); }
         catch (e) { res(null); }
       });
     }
+    var dlTierRadios = document.querySelectorAll('input[name="dlTier"]');
+    for (var dri = 0; dri < dlTierRadios.length; dri++) {
+      dlTierRadios[dri].addEventListener("change", function () {
+        $("downloadBtn").textContent = dlBtnLabel();
+      });
+    }
     $("downloadBtn").addEventListener("click", async function () {
-      if (!origImg && !rawMode) return;
+      if ((!origImg && !rawMode) || dlBusy) return;
       var btn = this;
+      var tier = dlTier();
+      var dims = dlTierDims(tier);
+      var tw = dims.tw, th = dims.th, scaled = dims.scaled;
+      var q = tier === "max" ? 1.0 : 0.95;
+      var qNote = tier === "max" ? "JPEG 最高畫質" : "JPEG 畫質 95（手機高清）";
       btn.disabled = true;
+      dlSetLock(true);
       clearError();
       var dlBox = $("dlResult"), dlText = $("dlText"), dlImg = $("dlImg");
+      var rel = { ai: false, raw: false };
       try {
-        // 目標尺寸：全尺寸，但總像素封頂（iOS canvas 上限）
-        var tw = fullW, th = fullH, scaled = false;
-        if (fullW * fullH > DL_SAFE_PX) {
-          var ds = Math.sqrt(DL_SAFE_PX / (fullW * fullH));
-          tw = Math.max(1, Math.floor(fullW * ds)); th = Math.max(1, Math.floor(fullH * ds));
-          scaled = true;
-        }
-        btn.textContent = "⏳ 產生緊 " + tw + "×" + th + " 圖…";
-        await dlNextFrame();
         var pp = getParams();
-        var out = dlBuildImageData(tw, th, pp, btn);
-        btn.textContent = "⏳ 編碼緊最高畫質 JPG…";
+        var out = null, fromCache = false;
+        if (tier === "mobile") {
+          var key = dlCacheKey(tw, th, pp);
+          if (dlCache.key === key && dlCache.canvas) {
+            out = dlCache.canvas; dlCache.canvas = null; fromCache = true;
+          } else if (dlCache.key === key && dlCache.promise) {
+            btn.textContent = "⏳ 等緊背景預備完成…";
+            var pc = await dlCache.promise;
+            if (pc && dlCacheKey(tw, th, getParams()) === key) { out = pc; fromCache = true; }
+          }
+        }
+        rel = dlReleaseBig();
+        if (!out) {
+          out = await dlBuildStriped(tw, th, pp, function (label) {
+            btn.textContent = "⏳ 導出緊（" + dlTierName(tier) + "）：" + label;
+          });
+        }
+        btn.textContent = "⏳ 編碼緊 JPG…";
         await dlNextFrame();
-        var blob = await dlToBlob(out);
+        var blob = await dlToBlob(out, q);
         if (!blob) {
           // 編碼失敗（多數係尺寸/記憶體）：自動再降一級重試，唔好直接死
-          tw = Math.max(1, Math.floor(tw * 0.7)); th = Math.max(1, Math.floor(th * 0.7));
+          var tw2 = Math.max(1, Math.floor(tw * 0.7)), th2 = Math.max(1, Math.floor(th * 0.7));
           scaled = true;
-          btn.textContent = "⏳ 出圖失敗，降至 " + tw + "×" + th + " 再試…";
+          btn.textContent = "⏳ 出圖失敗，降至 " + tw2 + "×" + th2 + " 再試…";
           await dlNextFrame();
-          out = dlBuildImageData(tw, th, getParams(), btn);
-          blob = await dlToBlob(out);
+          try { out.width = 0; out.height = 0; } catch (e) {}
+          out = await dlBuildStriped(tw2, th2, getParams(), null);
+          tw = tw2; th = th2; fromCache = false;
+          blob = await dlToBlob(out, q);
         }
-        out.width = 0; out.height = 0; // 釋放出圖畫布
         if (!blob) {
-          showError("產生下載圖失敗：相片太大，部機記憶體唔夠。試下唔好勾「RAW 全尺寸解碼」，或者用細啲嘅相。");
+          showError("產生下載圖失敗：相片太大，部機記憶體唔夠。試下揀「手機高清」級別，或者用細啲嘅相。");
+          try { out.width = 0; out.height = 0; } catch (e) {}
           return;
         }
         var fname = currentFileBase + "_restored.jpg";
         var sizeMB = (blob.size / 1048576).toFixed(1);
-        var dimNote = tw + "×" + th + (scaled ? "（原圖 " + fullW + "×" + fullH + " 太大，已自動降至 iOS 出到嘅上限）" : "（原尺寸）");
+        var dimNote = tw + "×" + th + (scaled ? "（原圖 " + fullW + "×" + fullH + " 太大，已自動降級）" : (tier === "mobile" && (tw !== fullW || th !== fullH) ? "（手機高清尺寸）" : "（原尺寸）"));
+        var metaNote = dlTierName(tier) + " · " + dimNote + " · " + qNote + " · " + sizeMB + " MB";
         // 兜底圖：無論邊條出檔路成功與否，都顯示出圖俾用戶長按儲存
         if (dlUrl) URL.revokeObjectURL(dlUrl);
         dlUrl = URL.createObjectURL(blob);
         dlImg.src = dlUrl;
         dlBox.classList.remove("hidden");
+        try { out.width = 0; out.height = 0; } catch (e) {}
         // 第 1 路：Web Share（iOS 分享表可直接「儲存影像」）
         var shared = false, shareCancelled = false;
         try {
@@ -1891,21 +2191,23 @@
           // 其他錯誤（例如用戶手勢已過期 NotAllowedError）→ 落下一路
         }
         if (shared) {
-          dlText.textContent = "✅ 完成：" + fname + "（" + dimNote + " · JPEG 最高畫質 · " + sizeMB + " MB）已透過分享儲存。下面係同一張圖，亦可長按儲存。";
+          dlText.textContent = "✅ 完成：" + fname + "（" + metaNote + "）已透過分享儲存。下面係同一張圖，亦可長按儲存。";
         } else if (shareCancelled) {
-          dlText.textContent = "已取消分享。下面係完成圖（" + dimNote + " · JPEG 最高畫質 · " + sizeMB + " MB），長按圖片 →「儲存影像」即可存相。";
+          dlText.textContent = "已取消分享。下面係完成圖（" + metaNote + "），長按圖片 →「儲存影像」即可存相。";
         } else {
           // 第 2 路：傳統 a.download
           var a = document.createElement("a");
           a.href = dlUrl; a.download = fname;
           document.body.appendChild(a); a.click(); a.remove();
-          dlText.textContent = "✅ 完成：" + fname + "（" + dimNote + " · JPEG 最高畫質 · " + sizeMB + " MB）已開始下載。如果冇自動下載，長按下面張圖 →「儲存影像」存相。";
+          dlText.textContent = "✅ 完成：" + fname + "（" + metaNote + "）已開始下載。如果冇自動下載，長按下面張圖 →「儲存影像」存相。";
         }
         dlBox.scrollIntoView({ behavior: "smooth", block: "nearest" });
       } catch (e) {
-        showError("下載處理出錯：" + (e && e.message ? e.message : e) + "。試下唔好勾「RAW 全尺寸解碼」再下載。");
+        showError("下載處理出錯：" + (e && e.message ? e.message : e) + "。試下揀「手機高清」級別再導出。");
       } finally {
-        btn.disabled = false; btn.textContent = DL_BTN_LABEL;
+        dlRebuildBig(rel);
+        dlSetLock(false);
+        btn.disabled = false; btn.textContent = dlBtnLabel();
       }
     });
 
@@ -2193,13 +2495,14 @@
     }
 
     /* ---------- v5 效果：暗角/顆粒 ---------- */
-    function applyEffects(imgData, p) {
+    function applyEffects(imgData, p, yOff, fullH) {
       var vig = p.vignette / 100, gr = p.grain / 100;
       if (!vig && !gr) return imgData;
       var w = imgData.width, h = imgData.height, d = imgData.data;
+      var yo = yOff || 0, fh = fullH || h; // v10.9: 分條導出傳入絕對行號，暗角/顆粒先同全圖一致
       var x, y, i;
       for (y = 0; y < h; y++) {
-        var dy = (y / (h - 1) - 0.5) * 2;
+        var dy = ((yo + y) / (fh - 1) - 0.5) * 2;
         for (x = 0; x < w; x++) {
           i = (y * w + x) * 4;
           if (vig !== 0) {
@@ -2211,7 +2514,7 @@
             d[i] *= fv; d[i + 1] *= fv; d[i + 2] *= fv;
           }
           if (gr !== 0) {
-            var hh = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+            var hh = Math.sin(x * 12.9898 + (yo + y) * 78.233) * 43758.5453;
             hh -= Math.floor(hh);
             var nz = (hh - 0.5) * gr * 76;
             d[i] += nz; d[i + 1] += nz; d[i + 2] += nz;
@@ -2357,16 +2660,21 @@
     }
     // 由 16-bit Float32 開發做 ImageData（dw×dh），ev = 曝光 EV
     function developRawSampled(ev, dw, dh) {
+      return developRawSampledRows(ev, dw, dh, 0, Math.max(1, dh | 0));
+    }
+    // v10.9: 只開發 [y0, y0+rows) 行（採樣公式同全圖版逐點一致），分條導出用
+    function developRawSampledRows(ev, dw, dh, y0, rows) {
       dw = Math.max(1, dw | 0); dh = Math.max(1, dh | 0);
       var sw = rawStore.w, sh = rawStore.h, sd = rawStore.data;
       var gain = Math.pow(2, ev);
-      var out = new ImageData(dw, dh), px = out.data;
-      var x, y, sx, sy, si, di;
-      for (y = 0; y < dh; y++) {
+      var out = new ImageData(dw, rows), px = out.data;
+      var x, ly, y, sx, sy, si, di;
+      for (ly = 0; ly < rows; ly++) {
+        y = y0 + ly;
         sy = Math.min(sh - 1, Math.round(y * sh / dh));
         for (x = 0; x < dw; x++) {
           sx = Math.min(sw - 1, Math.round(x * sw / dw));
-          si = (sy * sw + sx) * 3; di = (y * dw + x) * 4;
+          si = (sy * sw + sx) * 3; di = (ly * dw + x) * 4;
           px[di]     = Math.min(255, Math.max(0, Math.round(Math.min(1, sd[si] * gain) * 255)));
           px[di + 1] = Math.min(255, Math.max(0, Math.round(Math.min(1, sd[si + 1] * gain) * 255)));
           px[di + 2] = Math.min(255, Math.max(0, Math.round(Math.min(1, sd[si + 2] * gain) * 255)));
