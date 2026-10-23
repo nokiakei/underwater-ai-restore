@@ -21,7 +21,7 @@
 }}
 </script>
 <!-- v10: RAW 引擎檔喺 raw16/（index.js + worker.js + wpart00–19），全部同源。 -->
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js" crossorigin="anonymous"></script>
+<script src="./ort/ort.min.js"></script>
     <style>
       :root {
         color-scheme: dark;
@@ -68,6 +68,7 @@
       .status.error { color: var(--danger); border-color: #7a3434; }
       .status.error .dot { background: var(--danger); }
       .status.busy .dot { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+      .offstat { font-size: 12px; color: var(--ink-dim); margin-top: 6px; width: 100%; }
       @keyframes pulse { 50% { opacity: .35; } }
 
       /* ---- upload zone ---- */
@@ -264,6 +265,7 @@
           <span class="sub">Shallow-UWnet 神經網絡去藍綠偏色，喺你部機本地運算，相片唔會上傳去任何伺服器。</span>
         </h1>
         <div class="status busy" id="modelStatus"><span class="dot"></span><span id="modelStatusText">AI 模型載入中…</span></div>
+        <div class="offstat" id="offlineStatus">⬇️ 正在準備離線版…</div>
       </header>
 
       <div class="errbox" id="errBox"></div>
@@ -380,7 +382,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.10 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.11 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）<br />💡 貼士：第一次開站會下載約 22 MB 檔案嚟準備離線版；將本站「加入主畫面」之後離線用最穩陣，iOS 若長時間唔用可能會清除快取，屆時連線開一次就會自動重新準備。
       </footer>
     </div>
 
@@ -490,7 +492,7 @@
       }
       try {
         ort.env.wasm.numThreads = 1;
-        ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/";
+        ort.env.wasm.wasmPaths = "./ort/";
       } catch (e) { /* 環境設定失敗唔應該阻止載入 */ }
       setStatus("busy", "下載 AI 模型…");
       fetchModelParts()
@@ -2869,7 +2871,7 @@
     function decodeTIFF(file) {
       setStatus("busy", "TIFF 解碼緊…");
       clearError();
-      loadScriptOnce("https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js").then(function () {
+      loadScriptOnce("./UTIF.js").then(function () {
         return file.arrayBuffer();
       }).then(function (buf) {
         var ifds = UTIF.decode(buf);
@@ -2921,6 +2923,74 @@
     updateCompare();
     loadModel();
     loadSegModel(); // v10.5: 人物分割模型背景載入
+    </script>
+    <script>
+    /* ============ v10.11: 離線版（Service Worker 快取） ============
+       第一次在線開站，SW 會將全部關鍵資產存入快取；完成後斷網都用得晒。
+       狀態如實顯示：未數齊資產唔會扮已準備好。 */
+    (function () {
+      var VERSION = "v10.11";
+      function el() { return document.getElementById("offlineStatus"); }
+      function setUI(t) { var e = el(); if (e) e.textContent = t; }
+      if (!("serviceWorker" in navigator)) {
+        setUI("ℹ️ 此瀏覽器不支援離線快取（在線使用不受影響）");
+        return;
+      }
+      var repaired = false;
+      function applyStatus(s) {
+        if (!s) return;
+        if (s.complete) {
+          setUI("✅ 已可離線使用（" + VERSION + "）");
+        } else if (s.done > 0 || s.total) {
+          setUI("⬇️ 正在準備離線版… " + s.done + "/" + s.total);
+          /* 未齊又在線：叫 SW 補入缺少嘅檔案（每頁一次） */
+          if (!repaired && navigator.onLine) {
+            repaired = true;
+            setTimeout(askRepair, 1500);
+          }
+        }
+      }
+      function askRepair() {
+        if (navigator.serviceWorker.controller) {
+          navigator.serviceWorker.controller.postMessage({ type: "REPAIR" });
+        }
+      }
+      function askStatus() {
+        if (!navigator.serviceWorker.controller) return;
+        try {
+          var ch = new MessageChannel();
+          ch.port1.onmessage = function (ev) { applyStatus(ev.data); };
+          navigator.serviceWorker.controller.postMessage({ type: "STATUS" }, [ch.port2]);
+        } catch (e) { /* 舊瀏覽器唔支援 MessageChannel 就由廣播更新 */ }
+      }
+      navigator.serviceWorker.addEventListener("message", function (ev) {
+        var d = ev.data || {};
+        if (d.type === "PRECACHE_PROGRESS") {
+          applyStatus({ complete: false, done: d.done, total: d.total });
+        } else if (d.type === "PRECACHE_DONE") {
+          if (d.failed && d.failed.length) {
+            setUI("⚠️ 離線準備未完成（" + d.failed.length + " 個檔案未下載到，連線時會自動重試）");
+            repaired = false;
+          } else {
+            applyStatus({ complete: true, done: d.done, total: d.total });
+          }
+        } else if (d.type === "STATUS") {
+          applyStatus(d);
+        }
+      });
+      navigator.serviceWorker.register("./sw.js").then(function (reg) {
+        if (reg && reg.update) reg.update().catch(function () {});
+      }).catch(function () {
+        setUI("⚠️ 離線快取註冊失敗（在線使用不受影響）");
+      });
+      navigator.serviceWorker.addEventListener("controllerchange", function () {
+        setTimeout(askStatus, 600);
+      });
+      window.addEventListener("load", function () {
+        setTimeout(askStatus, 800);
+        setTimeout(askStatus, 5000);
+      });
+    })();
     </script>
   </body>
 </html>
