@@ -368,7 +368,7 @@
       <div class="actions hidden" id="actions">
         <div class="dltiers" role="radiogroup" aria-label="導出畫質">
           <label class="dltier"><input type="radio" name="dlTier" value="mobile" checked /> 📱 手機高清 <small>2400px・快・唔易爆記憶體</small></label>
-          <label class="dltier"><input type="radio" name="dlTier" value="max" /> 🖼 最高畫質 <small>原尺寸・檔大・較慢</small></label>
+          <label class="dltier"><input type="radio" name="dlTier" value="max" /> 🖼 最高畫質 <small>手機尺寸 2400px・JPEG 質素 1.0</small></label>
         </div>
         <button class="btn primary" id="downloadBtn" type="button">⬇ 導出相片（手機高清）</button>
         <button class="btn" id="resetBtn" type="button">↺ 重置微調</button>
@@ -380,7 +380,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.9 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
+        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.10 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）
       </footer>
     </div>
 
@@ -1786,7 +1786,9 @@
        1.2GB（大 JPG 來源亦過 1GB），爆 iOS 每頁記憶體上限。
        v10.9 修法：
        ① 分級：手機高清（預設，最長邊 ≤2400、JPEG 0.95，手機睇/分享同最高
-          畫質肉眼無分別）／最高畫質（原尺寸封頂 16MP、JPEG 1.0）；
+          畫質肉眼無分別）／最高畫質（v10.9 時原尺寸封頂 16MP、JPEG 1.0；
+          v10.10 用戶指示：輸出全部手機用，尺寸改為同樣封頂 ≤2400，
+          兩級分別只剩 JPEG 質素 0.95／1.0）；
        ② 分條渲染：成條導出管線逐段（256 行＋16 行 halo）計，段 buffer
           即用即棄；色度合併改三段逐段計（統計→增益→成圖），唔再開全尺寸
           中間陣列；導出期間暫放 aiFull（有 aiRawOut 時）同 RAW 嘅
@@ -1797,7 +1799,6 @@
           直接編碼；
        ④ 導出鎖 UI＋逐段進度；出檔三段式（share→a.download→長按圖）沿用
           v10.6；JPEG 畫質跟級別（手機 0.95／最高 1.0）。 */
-    var DL_SAFE_PX = 16000000;
     var DL_STRIP = 256, DL_HALO = 16;
     var dlBusy = false;
     function dlNextFrame() {
@@ -1813,17 +1814,12 @@
     function dlTierName(t) { return t === "max" ? "最高畫質" : "手機高清"; }
     function dlBtnLabel() { return "⬇ 導出相片（" + dlTierName(dlTier()) + "）"; }
     function dlTierDims(t) {
-      var tw = fullW, th = fullH, scaled = false;
-      if (t === "mobile") {
-        var sc = Math.min(1, 2400 / Math.max(fullW, fullH));
-        tw = Math.max(1, Math.round(fullW * sc));
-        th = Math.max(1, Math.round(fullH * sc));
-      } else if (tw * th > DL_SAFE_PX) {
-        var ds = Math.sqrt(DL_SAFE_PX / (tw * th));
-        tw = Math.max(1, Math.floor(fullW * ds));
-        th = Math.max(1, Math.floor(fullH * ds));
-        scaled = true;
-      }
+      // v10.10：兩級尺寸統一封頂最長邊 2400（用戶指示：輸出全部手機用）；
+      // 級別分別只剩 JPEG 質素（mobile 0.95／max 1.0，喺導出嗰陣揀）。
+      var sc = Math.min(1, 2400 / Math.max(fullW, fullH));
+      var tw = Math.max(1, Math.round(fullW * sc));
+      var th = Math.max(1, Math.round(fullH * sc));
+      var scaled = (tw !== fullW || th !== fullH);
       return { tw: tw, th: th, scaled: scaled };
     }
     /* ---------- 分條小工具 ---------- */
@@ -2027,7 +2023,7 @@
       return out;
     }
     /* ---------- 緩存預備（手機高清級） ---------- */
-    var dlCache = { key: "", canvas: null, promise: null };
+    var dlCache = { key: "", canvas: null, promise: null, tier: "" };
     var dlIdleTimer = null;
     function dlCacheKey(tw, th, pp) {
       var wbS = wb ? (wb.r + "," + wb.g + "," + wb.b) : "";
@@ -2039,7 +2035,7 @@
     function dlCacheDrop() {
       if (typeof dlCache === "undefined" || !dlCache) return;
       if (dlCache.canvas) { try { dlCache.canvas.width = 0; dlCache.canvas.height = 0; } catch (e) {} }
-      dlCache.key = ""; dlCache.canvas = null; dlCache.promise = null;
+      dlCache.key = ""; dlCache.canvas = null; dlCache.promise = null; dlCache.tier = "";
       if (dlIdleTimer) { clearTimeout(dlIdleTimer); dlIdleTimer = null; }
     }
     function dlScheduleIdleCache() {
@@ -2070,7 +2066,7 @@
         if (dlCache.key === key) dlCache.promise = null;
         return null;
       });
-      dlCache.key = key; dlCache.canvas = null; dlCache.promise = promise;
+      dlCache.key = key; dlCache.canvas = null; dlCache.promise = promise; dlCache.tier = "mobile";
     }
     /* ---------- 導出期間暫放大畫布（完咗重建） ---------- */
     function dlReleaseBig() {
@@ -2135,9 +2131,10 @@
         var out = null, fromCache = false;
         if (tier === "mobile") {
           var key = dlCacheKey(tw, th, pp);
-          if (dlCache.key === key && dlCache.canvas) {
+          // v10.10：用緩存前核對級別一致（緩存只會係 mobile 級；max 級一律行分條管線即時計）
+          if (dlCache.key === key && dlCache.tier === tier && dlCache.canvas) {
             out = dlCache.canvas; dlCache.canvas = null; fromCache = true;
-          } else if (dlCache.key === key && dlCache.promise) {
+          } else if (dlCache.key === key && dlCache.tier === tier && dlCache.promise) {
             btn.textContent = "⏳ 等緊背景預備完成…";
             var pc = await dlCache.promise;
             if (pc && dlCacheKey(tw, th, getParams()) === key) { out = pc; fromCache = true; }
@@ -2170,7 +2167,7 @@
         }
         var fname = currentFileBase + "_restored.jpg";
         var sizeMB = (blob.size / 1048576).toFixed(1);
-        var dimNote = tw + "×" + th + (scaled ? "（原圖 " + fullW + "×" + fullH + " 太大，已自動降級）" : (tier === "mobile" && (tw !== fullW || th !== fullH) ? "（手機高清尺寸）" : "（原尺寸）"));
+        var dimNote = tw + "×" + th + ((tw !== fullW || th !== fullH) ? "（原圖 " + fullW + "×" + fullH + "，已縮細至手機尺寸）" : "（原尺寸）");
         var metaNote = dlTierName(tier) + " · " + dimNote + " · " + qNote + " · " + sizeMB + " MB";
         // 兜底圖：無論邊條出檔路成功與否，都顯示出圖俾用戶長按儲存
         if (dlUrl) URL.revokeObjectURL(dlUrl);
