@@ -139,7 +139,9 @@
         max-height: 42vh; background: #02141c;
       }
       .stage.sticky canvas.result { max-height: 42vh; width: auto; max-width: 100%; margin: 0 auto; }
-      .stage.sticky canvas.orig { height: 100%; }
+      /* v10.12：orig 層唔再拉滿 stage（改由 JS 按 result 實際顯示框定位，見 syncOrigBox）。
+         舊寫法 height:100%＋width:100% 會將原圖拉去成個 stage 闊框——直倒相嗰陣 stage
+         框闊過相片框，原圖就被橫向拉闊（1320×2348 變 ~2.3:1 橫幅），對比冇法對齊。 */
       @media (min-width: 561px) {
         .stage.sticky { max-height: 52vh; }
         .stage.sticky canvas.result { max-height: 52vh; }
@@ -369,8 +371,8 @@
 
       <div class="actions hidden" id="actions">
         <div class="dltiers" role="radiogroup" aria-label="導出畫質">
-          <label class="dltier"><input type="radio" name="dlTier" value="mobile" checked /> 📱 手機高清 <small>2400px・快・唔易爆記憶體</small></label>
-          <label class="dltier"><input type="radio" name="dlTier" value="max" /> 🖼 最高畫質 <small>手機尺寸 2400px・JPEG 質素 1.0</small></label>
+          <label class="dltier"><input type="radio" name="dlTier" value="mobile" checked /> 📱 手機高清 <small id="dlMobileNote">最長邊 2400px・JPEG 0.95</small></label>
+          <label class="dltier"><input type="radio" name="dlTier" value="max" /> 🖼 最高畫質 <small id="dlMaxNote">原圖尺寸・JPEG 1.0</small></label>
         </div>
         <button class="btn primary" id="downloadBtn" type="button">⬇ 導出相片（手機高清）</button>
         <button class="btn" id="resetBtn" type="button">↺ 重置微調</button>
@@ -382,7 +384,7 @@
       </div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.11 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）<br />💡 貼士：第一次開站會下載約 22 MB 檔案嚟準備離線版；將本站「加入主畫面」之後離線用最穩陣，iOS 若長時間唔用可能會清除快取，屆時連線開一次就會自動重新準備。
+        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v10.12 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）<br />💡 貼士：第一次開站會下載約 22 MB 檔案嚟準備離線版；將本站「加入主畫面」之後離線用最穩陣，iOS 若長時間唔用可能會清除快取，屆時連線開一次就會自動重新準備。
       </footer>
     </div>
 
@@ -1634,17 +1636,37 @@
     }
 
     /* ============ 對比拖動 ============ */
+    // v10.12 真因：stage 成日係 .sticky——result 層按 max-height 42/52vh＋width:auto
+    // 置中，佔嘅框細過成個 stage（直倒相兩邊留空位）；但 orig 層 CSS 係
+    // inset:0＋width/height:100%，拉滿成個 stage 闊框，於是原圖被橫向拉闊
+    // （直倒 1320×2348 變 ~2.3:1 橫幅）。修法：orig 層由 JS 按 result 實際
+    // 顯示框逐 px 定位，兩層同一位置、同一縮放、同一比例；分隔線同拖動
+    // 座標亦改用相片框（唔再用 stage 框），拉桿先至逐像素對齊。
+    // 顯示層修法——origCanvas 數據本身一啲都唔郁（原圖 bit-identical 鐵律）。
+    function imgRect() { return resultCanvas.getBoundingClientRect(); }
+    function syncOrigBox() {
+      var r = imgRect(), s = stage.getBoundingClientRect();
+      origCanvas.style.left = (r.left - s.left) + "px";
+      origCanvas.style.top = (r.top - s.top) + "px";
+      origCanvas.style.right = "auto";
+      origCanvas.style.bottom = "auto";
+      origCanvas.style.width = r.width + "px";
+      origCanvas.style.height = r.height + "px";
+    }
     function updateCompare() {
+      syncOrigBox();
+      var r = imgRect(), s = stage.getBoundingClientRect();
       var pct = comparePos * 100;
-      divider.style.left = pct + "%";
+      divider.style.left = (r.left - s.left + comparePos * r.width) + "px";
       origCanvas.style.clipPath = "inset(0 " + (100 - pct) + "% 0 0)";
     }
     var dragging = false;
     function stagePos(e) {
-      var rect = stage.getBoundingClientRect();
-      var x = (e.clientX - rect.left) / rect.width;
+      var r = imgRect();
+      var x = (e.clientX - r.left) / r.width;
       return Math.min(1, Math.max(0, x));
     }
+    window.addEventListener("resize", function () { if (origImg || rawMode) updateCompare(); });
     stage.addEventListener("pointerdown", function (e) {
       if (sampling) { sampleAt(e); return; }
       dragging = true;
@@ -1682,7 +1704,7 @@
     function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
     function sampleAt(e) {
       if (!lastBasePv) return;
-      var rect = stage.getBoundingClientRect();
+      var rect = imgRect(); // v10.12：取樣座標改用相片框（舊用 stage 框，直倒相會採錯像素）
       var cx = Math.round((e.clientX - rect.left) / rect.width * pvW);
       var cy = Math.round((e.clientY - rect.top) / rect.height * pvH);
       var half = 7, sr = 0, sg = 0, sb = 0, cnt = 0;
@@ -1790,7 +1812,10 @@
        ① 分級：手機高清（預設，最長邊 ≤2400、JPEG 0.95，手機睇/分享同最高
           畫質肉眼無分別）／最高畫質（v10.9 時原尺寸封頂 16MP、JPEG 1.0；
           v10.10 用戶指示：輸出全部手機用，尺寸改為同樣封頂 ≤2400，
-          兩級分別只剩 JPEG 質素 0.95／1.0）；
+          兩級分別只剩 JPEG 質素 0.95／1.0；v10.12 用戶最新指示：最高畫質
+          改返原圖尺寸，之後再改為按裝置分流——桌面 Chromium／Gecko 解鎖
+          全解像，任何 WebKit（iOS／macOS Safari、iPad 桌面 UA）同手機
+          一律 keep 16MP（WebKit canvas 上限 16,777,216px））；
        ② 分條渲染：成條導出管線逐段（256 行＋16 行 halo）計，段 buffer
           即用即棄；色度合併改三段逐段計（統計→增益→成圖），唔再開全尺寸
           中間陣列；導出期間暫放 aiFull（有 aiRawOut 時）同 RAW 嘅
@@ -1815,14 +1840,52 @@
     }
     function dlTierName(t) { return t === "max" ? "最高畫質" : "手機高清"; }
     function dlBtnLabel() { return "⬇ 導出相片（" + dlTierName(dlTier()) + "）"; }
+    // v10.12：最高畫質按裝置分流。WebKit canvas 硬上限 16,777,216px（iOS 全部瀏覽器
+    // 底層都係 WebKit），所以任何 WebKit 一律 16MP 封頂；只喺桌面 Chromium／Gecko
+    // 先解鎖全解像（Chrome 上限 32,767px 一邊、總面積 268MP，32.9MP 遠遠入面，
+    // 實際限制只係 RAM）。macOS Safari 上限未核實，保守當 WebKit 計；未知引擎
+    // 同手機 UA（Android Chrome 都係手機，RAM 有限）一律 keep 16MP。
+    var DL_MAX_UNCAPPED = (function () {
+      var ua = navigator.userAgent || "";
+      var isChromium = /Chrome\/|Chromium\/|Edg\//.test(ua);
+      var isFirefox = /Firefox\//.test(ua);
+      var isWebKit = /AppleWebKit\//.test(ua) && !isChromium;
+      var isIPadDesktopUA = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+      var isMobileUA = /Mobile\/|Android|iPhone|iPad|iPod/.test(ua);
+      if (isWebKit || isIPadDesktopUA || isMobileUA) return false;
+      if (isChromium || isFirefox) return true;
+      return false;
+    })();
     function dlTierDims(t) {
-      // v10.10：兩級尺寸統一封頂最長邊 2400（用戶指示：輸出全部手機用）；
-      // 級別分別只剩 JPEG 質素（mobile 0.95／max 1.0，喺導出嗰陣揀）。
+      // v10.12：最高畫質按裝置分流——桌面 Chromium／Gecko 解鎖全解像（原圖有幾大
+      // 出幾大）；任何 WebKit／手機一律原圖尺寸封頂 16MP（v10.9 已驗證設計）。
+      // 手機高清維持最長邊 ≤2400、JPEG 0.95。16MP 封頂唔拆——無封頂 32.9MP
+      // 曾經令 iOS jetsam 殺頁。q 喺導出嗰陣揀（mobile 0.95／max 1.0）。
+      if (t === "max") {
+        if (DL_MAX_UNCAPPED) return { tw: fullW, th: fullH, scaled: false };
+        var scM = Math.min(1, Math.sqrt(16000000 / Math.max(1, fullW * fullH)));
+        var twM = Math.max(1, Math.round(fullW * scM));
+        var thM = Math.max(1, Math.round(fullH * scM));
+        return { tw: twM, th: thM, scaled: (twM !== fullW || thM !== fullH) };
+      }
       var sc = Math.min(1, 2400 / Math.max(fullW, fullH));
       var tw = Math.max(1, Math.round(fullW * sc));
       var th = Math.max(1, Math.round(fullH * sc));
-      var scaled = (tw !== fullW || th !== fullH);
-      return { tw: tw, th: th, scaled: scaled };
+      return { tw: tw, th: th, scaled: (tw !== fullW || th !== fullH) };
+    }
+    // v10.12：導出選項顯示呢張相實際會出嘅尺寸＋呢部機嘅上限，唔好令用戶撳錯
+    function updateDlTierNotes() {
+      var m = $("dlMobileNote"), x = $("dlMaxNote");
+      if (!m || !x) return;
+      var capNote = DL_MAX_UNCAPPED ? "呢部機可出全解像" : "呢部機上限 16MP";
+      if (!fullW) {
+        m.textContent = "最長邊 2400px・JPEG 0.95";
+        x.textContent = "原圖解像・JPEG 1.0（" + capNote + "）";
+        return;
+      }
+      var dm = dlTierDims("mobile"), dx = dlTierDims("max");
+      m.textContent = "最長邊 2400px → " + dm.tw + "×" + dm.th + "・JPEG 0.95";
+      x.textContent = "原圖解像 → " + dx.tw + "×" + dx.th + "・JPEG 1.0（" + capNote + "）";
     }
     /* ---------- 分條小工具 ---------- */
     // 由來源畫布抽目標尺寸 [ey0,ey1) 行做細畫布（比例映射，blend/合併共用）
@@ -2169,7 +2232,7 @@
         }
         var fname = currentFileBase + "_restored.jpg";
         var sizeMB = (blob.size / 1048576).toFixed(1);
-        var dimNote = tw + "×" + th + ((tw !== fullW || th !== fullH) ? "（原圖 " + fullW + "×" + fullH + "，已縮細至手機尺寸）" : "（原尺寸）");
+        var dimNote = tw + "×" + th + ((tw !== fullW || th !== fullH) ? "（原圖 " + fullW + "×" + fullH + (tier === "max" ? "，已按 16MP 上限縮細" : "，已縮細至手機尺寸") + "）" : "（原尺寸）");
         var metaNote = dlTierName(tier) + " · " + dimNote + " · " + qNote + " · " + sizeMB + " MB";
         // 兜底圖：無論邊條出檔路成功與否，都顯示出圖俾用戶長按儲存
         if (dlUrl) URL.revokeObjectURL(dlUrl);
@@ -2913,6 +2976,7 @@
       controls.classList.remove("hidden");
       actions.classList.remove("hidden");
       updateCompare();
+      updateDlTierNotes();
       requestRender();
       if (modelReady) runAI();
       else setStatus("busy", "等緊 AI 模型載入…");
@@ -2921,6 +2985,7 @@
     /* ============ 啟動 ============ */
     buildProGroups(); // v5: 生成專業調整面板
     updateCompare();
+    updateDlTierNotes(); // v10.12：開站即顯示呢部機嘅最高畫質上限，唔使等上傳先知
     loadModel();
     loadSegModel(); // v10.5: 人物分割模型背景載入
     </script>
@@ -2929,7 +2994,7 @@
        第一次在線開站，SW 會將全部關鍵資產存入快取；完成後斷網都用得晒。
        狀態如實顯示：未數齊資產唔會扮已準備好。 */
     (function () {
-      var VERSION = "v10.11";
+      var VERSION = "v10.12";
       function el() { return document.getElementById("offlineStatus"); }
       function setUI(t) { var e = el(); if (e) e.textContent = t; }
       if (!("serviceWorker" in navigator)) {
