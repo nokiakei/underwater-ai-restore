@@ -1,13 +1,13 @@
-/* 水下 AI 還原 — 離線快取 Service Worker（v10.12）
+/* 水下 AI 還原 — 離線快取 Service Worker（v11.0）
    設計：第一次在線開站時，install 階段將全部關鍵資產（頁面、AI 模型分塊、
-   人物分割分塊、RAW 引擎、ONNX Runtime、UTIF）逐件存入 Cache Storage；
+   人物分割分塊、RAW 引擎、ONNX Runtime）逐件存入 Cache Storage；
    之後所有同源請求 cache-first，斷網都開到站、用得晒全部功能。
    改版時必須同步升 CACHE 名稱（同 index.html 頁腳版號一致），舊 cache 會喺 activate 清走。
    字型（Google Fonts）用獨立 runtime cache：純外觀資產，第一次成功載入後離線沿用，
    載入唔到就用系統字型，唔影響任何功能。 */
 "use strict";
 
-var CACHE = "uw-v10.12";
+var CACHE = "uw-v11.0";
 var FONT_CACHE = "uw-fonts-v1";
 
 function parts(prefix, n) {
@@ -21,7 +21,6 @@ var PRECACHE = [
   "./index.html",
   "./ort/ort.min.js",
   "./ort/ort-wasm-simd.wasm",
-  "./UTIF.js",
   "./raw16/index.js",
   "./raw16/worker.js"
 ]
@@ -159,6 +158,37 @@ self.addEventListener("fetch", function (event) {
 
   if (url.origin !== self.location.origin) return; /* 其他跨域唔經手 */
 
+  /* v11.0 F-A: 導航請求走 network-first。純 cache-first 會令已裝離線版的用戶在
+     **首次導航**時仍用舊頁（該次導航仍由舊 SW 控制，而舊頁面沒有 controllerchange
+     處理器）；之後由 network-first + controllerchange 保證一次導航見新版。
+     （註：並無「新 SW install 被舊 SW 餵入舊頁」這回事——SW 自身發起的 fetch 不被
+     自己攔截，已由實測反證。）斷網時回退 cache，離線功能不受影響。 */
+  if (req.mode === "navigate") {
+    event.respondWith(
+      fetch(req, { cache: "no-cache" }).then(function (resp) {
+        if (resp && resp.ok && !resp.redirected) {
+          var copy = resp.clone();
+          // v11.0 r6/r9: waitUntil 保住寫回；put 回傳 Promise 必須接 .catch；
+          // 外層再包 try/catch（某些引擎在 event 非 active 時會同步拋錯 → 導航 reject）
+          try {
+            event.waitUntil(
+              caches.open(CACHE).then(function (c) { return c.put("./index.html", copy); }).catch(function () {})
+            );
+          } catch (e) {}
+        }
+        return resp;
+      }).catch(function () {
+        return caches.open(CACHE).then(function (c) {
+          return c.match("./index.html", { ignoreSearch: true });
+        }).then(function (hit) {
+          if (hit) return hit;
+          throw new Error("offline and no cached shell");
+        });
+      })
+    );
+    return;
+  }
+
   event.respondWith(
     caches.open(CACHE).then(function (cache) {
       return cache.match(req, { ignoreSearch: true }).then(function (hit) {
@@ -169,15 +199,6 @@ self.addEventListener("fetch", function (event) {
               try { cache.put(req, resp.clone()); } catch (e) {}
             }
             return resp;
-          })
-          .catch(function (err) {
-            if (req.mode === "navigate") {
-              return cache.match("./index.html").then(function (idx) {
-                if (idx) return idx;
-                throw err;
-              });
-            }
-            throw err;
           });
       });
     })
