@@ -230,6 +230,8 @@
         border-radius: 10px; padding: 12px 14px; font-size: 14px; line-height: 1.7;
       }
       .dlresult img { display: block; max-width: 100%; border-radius: 8px; margin-top: 10px; }
+      .dlbar { height: 10px; border-radius: 5px; background: #123527; margin-top: 10px; overflow: hidden; }
+      .dlbar div { height: 100%; width: 0%; background: var(--accent); border-radius: 5px; transition: width .2s; }
 
       footer { margin-top: 26px; font-size: 12.5px; color: var(--ink-faint); line-height: 1.8; }
       .hidden { display: none !important; }
@@ -485,6 +487,7 @@
       </div><!-- /workspace -->
       <div class="dlresult hidden" id="dlResult">
         <div id="dlText"></div>
+        <div class="dlbar hidden" id="dlBar"><div id="dlBarFill"></div></div>
         <img id="dlImg" alt="還原完成圖（可長按儲存）" />
       </div>
 
@@ -492,7 +495,7 @@
       <div class="sheet-backdrop" id="sheetBackdrop"></div>
 
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v11.1 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）<br />💡 貼士：第一次開站會下載約 22 MB 檔案嚟準備離線版；將本站「加入主畫面」之後離線用最穩陣，iOS 若長時間唔用可能會清除快取，屆時連線開一次就會自動重新準備。
+        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v11.2 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）<br />💡 貼士：第一次開站會下載約 22 MB 檔案嚟準備離線版；將本站「加入主畫面」之後離線用最穩陣，iOS 若長時間唔用可能會清除快取，屆時連線開一次就會自動重新準備。
       </footer>
     </div>
 
@@ -2221,9 +2224,17 @@
           v10.6；JPEG 畫質跟級別（手機 0.95／最高 1.0）。 */
     var DL_STRIP = 256, DL_HALO = 16;
     var dlBusy = false;
+    /* v11.2：rAF＋100ms 超時雙保險——分頁背景化嗰陣 rAF 會被節流，單靠 rAF 嘅 yield
+       可以拖幾秒先返，成個導出迴圈就會企住；超時兜底保證每段最多等 100ms 就繼續，
+       進度先畫得出。正常情況 rAF 幾 ms 就返，兜底唔會觸發。 */
     function dlNextFrame() {
       return new Promise(function (res) {
-        requestAnimationFrame(function () { setTimeout(res, 0); });
+        var done = false;
+        var to = setTimeout(function () { if (!done) { done = true; res(); } }, 100);
+        requestAnimationFrame(function () {
+          if (done) return;
+          done = true; clearTimeout(to); setTimeout(res, 0);
+        });
       });
     }
     /* ---------- 分級 ---------- */
@@ -2358,7 +2369,7 @@
     }
     // v11.0 F-02: 與預覽同一套公式——單遍統計（唔再「增益後第二遍」），
     // lift 由原始均值計；增益／提亮的淡出在 dlMergeStrip 逐像素套用。
-    async function dlMergeGains(pp, tw, th, progress) {
+    async function dlMergeGains(pp, tw, th, progress, shouldCancel) {
       var n = tw * th;
       var sumR = 0, sumG = 0, sumB = 0;
       for (var y0 = 0; y0 < th; y0 += DL_STRIP) {
@@ -2385,6 +2396,7 @@
         }
         if (progress) progress("準備顏色層");
         await dlNextFrame();
+        if (shouldCancel && shouldCancel()) throw new Error("dl-cancelled");
       }
       var rg = sumR / Math.max(sumG, 1e-6), bg = sumB / Math.max(sumG, 1e-6);
       var rGain = Math.min(2.4, Math.max(0.75, 0.76 / rg));
@@ -2428,7 +2440,8 @@
       return out;
     }
     /* ---------- 分條主流程：blend＋皮膚＋基本＋顏色＋細節＋效果，逐段入成品畫布 ---------- */
-    async function dlBuildStriped(tw, th, pp, progress) {
+    async function dlBuildStriped(tw, th, pp, progress, shouldCancel) {
+      if (shouldCancel && shouldCancel()) throw new Error("dl-cancelled");
       var out = document.createElement("canvas");
       out.width = tw; out.height = th;
       var octx = out.getContext("2d", { willReadFrequently: true });
@@ -2454,7 +2467,7 @@
         try {
           var mSc = Math.min(1, Math.sqrt(12500000 / (tw * th)));
           var mw2 = Math.max(8, Math.round(tw * mSc)), mh2 = Math.max(8, Math.round(th * mSc));
-          gains = await dlMergeGains(pp, mw2, mh2, progress);
+          gains = await dlMergeGains(pp, mw2, mh2, progress, shouldCancel);
           mergedC = document.createElement("canvas");
           mergedC.width = mw2; mergedC.height = mh2;
           var mctx = mergedC.getContext("2d", { willReadFrequently: true });
@@ -2469,8 +2482,9 @@
             mctx.putImageData(dlMergeStrip(mAiD, mLuma, mw2, mrows, gains), 0, mey0, 0, my0 - mey0, mw2, my1 - my0);
             if (progress) progress("砌合併層 " + Math.min(mh2, my1) + "/" + mh2 + " 行");
             await dlNextFrame();
+            if (shouldCancel && shouldCancel()) throw new Error("dl-cancelled");
           }
-        } catch (eG) { useMerge = false; gains = null; mergedC = null; }
+        } catch (eG) { if (eG && eG.message === "dl-cancelled") throw eG; useMerge = false; gains = null; mergedC = null; }
       }
       var blendC = document.createElement("canvas");
       var bctx = blendC.getContext("2d", { willReadFrequently: true });
@@ -2502,6 +2516,7 @@
         done++;
         if (progress) progress("第 " + done + "/" + total + " 段");
         await dlNextFrame();
+        if (shouldCancel && shouldCancel()) throw new Error("dl-cancelled");
       }
       return out;
     }
@@ -2553,7 +2568,14 @@
       var pp = getParams();
       var key = dlCacheKey(dims.tw, dims.th, pp);
       if (dlCache.key === key && (dlCache.canvas || dlCache.promise)) return;
-      var promise = dlBuildStriped(dims.tw, dims.th, pp, null).then(function (cv) {
+      /* v11.2：背景 build 可取消——新 key（新滑桿狀態）或者最高畫質導出開始咗，就喺下一段邊界停低，
+         唔好再同前景導出爭主線程。手機級導出等緊呢個 build 嗰陣唔取消（佢會直接用）。 */
+      /* v11.2 修正：dlCache.key 必須喺呼叫 dlBuildStriped 之前賦值——build 入口嘅取消檢查係同步執行，
+         若賦值喺呼叫之後，入口嗰陣 dlCache.key 仲係舊值，predicate 永遠判 true，新 key 嘅第一個 build 即死。 */
+      dlCache.key = key; dlCache.canvas = null; dlCache.promise = null; dlCache.tier = "mobile";
+      var promise = dlBuildStriped(dims.tw, dims.th, pp, null, function () {
+        return dlCache.key !== key || (dlBusy && dlTier() === "max");
+      }).then(function (cv) {
         if (dlCache.key === key && dlCache.promise === promise) {
           dlCache.canvas = cv; dlCache.promise = null;
         } else {
@@ -2564,7 +2586,7 @@
         if (dlCache.key === key) dlCache.promise = null;
         return null;
       });
-      dlCache.key = key; dlCache.canvas = null; dlCache.promise = promise; dlCache.tier = "mobile";
+      dlCache.promise = promise;
     }
     /* ---------- 導出期間暫放大畫布（完咗重建） ---------- */
     function dlReleaseBig() {
@@ -2598,6 +2620,43 @@
       }
       var radios = document.querySelectorAll('input[name="dlTier"]');
       for (var i = 0; i < radios.length; i++) radios[i].disabled = on;
+    }
+    /* v11.2：導出進度顯示——寫入 dlText＋進度條（唔只係按鈕文字），等用戶喺結果區都睇到；
+       每秒更新已用時間，慢嗰陣都知佢郁緊唔係死咗。 */
+    var dlProgState = { label: "", pct: 0, t0: 0, timer: null };
+    function dlRenderProgress() {
+      var el = $("dlText"), bar = $("dlBar"), fill = $("dlBarFill");
+      if (!el) return;
+      var secs = Math.max(0, Math.round((Date.now() - dlProgState.t0) / 1000));
+      el.textContent = "⏳ " + dlProgState.label + "（已用 " + secs + " 秒）";
+      if (bar) bar.classList.remove("hidden");
+      if (fill) fill.style.width = Math.max(0, Math.min(100, dlProgState.pct)) + "%";
+    }
+    function dlProgressFromLabel(label) {
+      // 階段佔比（一段 build 約三份：增益統計 → 砌合併層 → 主循環）
+      var m;
+      if (label === "準備顏色層") return 15;
+      m = label.match(/^砌合併層 (\d+)\/(\d+) 行$/);
+      if (m) return 30 + 25 * (+m[1] / +m[2]);
+      m = label.match(/^第 (\d+)\/(\d+) 段$/);
+      if (m) return 55 + 45 * (+m[1] / +m[2]);
+      return null;
+    }
+    function dlStartProgress(tier) {
+      dlProgState.t0 = Date.now();
+      dlProgState.label = "導出緊（" + dlTierName(tier) + "）：準備緊…";
+      dlProgState.pct = 2;
+      var box = $("dlResult"), img = $("dlImg");
+      if (box) box.classList.remove("hidden");
+      if (img) img.classList.add("hidden");
+      if (dlProgState.timer) clearInterval(dlProgState.timer);
+      dlProgState.timer = setInterval(dlRenderProgress, 1000);
+      dlRenderProgress();
+    }
+    function dlStopProgress() {
+      if (dlProgState.timer) { clearInterval(dlProgState.timer); dlProgState.timer = null; }
+      var bar = $("dlBar");
+      if (bar) bar.classList.add("hidden");
     }
     /* ============ v11.0 F-04: EXIF 讀寫（只處理基礎標籤，無外部依賴） ============ */
     function exifAscii(dv, off, cnt) {
@@ -2775,6 +2834,8 @@
       try {
         var pp = getParams();
         var out = null, fromCache = false;
+        dlStartProgress(tier);
+        await dlNextFrame(); // 等進度畫出嚟先開始重計，唔好第一段做完先見字
         if (tier === "mobile") {
           var key = dlCacheKey(tw, th, pp);
           // v10.10：用緩存前核對級別一致（緩存只會係 mobile 級；max 級一律行分條管線即時計）
@@ -2782,6 +2843,7 @@
             out = dlCache.canvas; dlCache.canvas = null; fromCache = true;
           } else if (dlCache.key === key && dlCache.tier === tier && dlCache.promise) {
             btn.textContent = "⏳ 等緊背景預備完成…";
+            dlProgState.label = "等緊背景預備完成…"; dlProgState.pct = 5; dlRenderProgress();
             var pc = await dlCache.promise;
             if (pc && dlCacheKey(tw, th, getParams()) === key) { out = pc; fromCache = true; }
           }
@@ -2790,9 +2852,14 @@
         if (!out) {
           out = await dlBuildStriped(tw, th, pp, function (label) {
             btn.textContent = "⏳ 導出緊（" + dlTierName(tier) + "）：" + label;
+            var pc = dlProgressFromLabel(label);
+            if (pc != null) dlProgState.pct = pc;
+            dlProgState.label = "導出緊（" + dlTierName(tier) + "）：" + label;
+            dlRenderProgress();
           });
         }
         btn.textContent = "⏳ 編碼緊 JPG…";
+        dlProgState.label = "編碼緊 JPG…"; dlProgState.pct = 98; dlRenderProgress();
         await dlNextFrame();
         var blob = await dlToBlob(out, q);
         if (!blob) {
@@ -2800,6 +2867,7 @@
           var tw2 = Math.max(1, Math.floor(tw * 0.7)), th2 = Math.max(1, Math.floor(th * 0.7));
           scaled = true;
           btn.textContent = "⏳ 出圖失敗，降至 " + tw2 + "×" + th2 + " 再試…";
+          dlProgState.label = "出圖失敗，降至 " + tw2 + "×" + th2 + " 再試…"; dlProgState.pct = 30; dlRenderProgress();
           await dlNextFrame();
           try { out.width = 0; out.height = 0; } catch (e) {}
           out = await dlBuildStriped(tw2, th2, getParams(), null);
@@ -2819,6 +2887,7 @@
         if (dlUrl) URL.revokeObjectURL(dlUrl);
         dlUrl = URL.createObjectURL(blob);
         dlImg.src = dlUrl;
+        dlImg.classList.remove("hidden");
         dlBox.classList.remove("hidden");
         try { out.width = 0; out.height = 0; } catch (e) {}
         // 第 1 路：Web Share（iOS 分享表可直接「儲存影像」）
@@ -2857,6 +2926,7 @@
       } catch (e) {
         showError("下載處理出錯：" + (e && e.message ? e.message : e) + "。試下揀「手機高清」級別再導出。");
       } finally {
+        dlStopProgress();
         dlRebuildBig(rel);
         dlSetLock(false);
         btn.disabled = false; btn.textContent = dlBtnLabel();
@@ -3747,7 +3817,7 @@
        第一次在線開站，SW 會將全部關鍵資產存入快取；完成後斷網都用得晒。
        狀態如實顯示：未數齊資產唔會扮已準備好。 */
     (function () {
-      var VERSION = "v11.1";
+      var VERSION = "v11.2";
       function el() { return document.getElementById("offlineStatus"); }
       function setUI(t) { var e = el(); if (e) e.textContent = t; }
       if (!("serviceWorker" in navigator)) {

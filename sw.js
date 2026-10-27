@@ -1,4 +1,4 @@
-/* 水下 AI 還原 — 離線快取 Service Worker（v11.0）
+/* 水下 AI 還原 — 離線快取 Service Worker（v11.2）
    設計：第一次在線開站時，install 階段將全部關鍵資產（頁面、AI 模型分塊、
    人物分割分塊、RAW 引擎、ONNX Runtime）逐件存入 Cache Storage；
    之後所有同源請求 cache-first，斷網都開到站、用得晒全部功能。
@@ -7,9 +7,10 @@
    載入唔到就用系統字型，唔影響任何功能。 */
 "use strict";
 
-// v11.1：資產（模型/ort/raw16）未變，只改 index.html 與 sw.js，而導航請求行 network-first，
-// 故此處刻意**不升** cache 名，免得用戶白白重新下載 22MB 模型。
-var CACHE = "uw-v11.0";
+// v11.2：index.html 改咗（慢導出修復＋進度顯示），cache 名跟住升至 uw-v11.2，
+  // 等舊 cache 喺 activate 清走、離線用戶都攞到新版（唔再靠導航逐次寫回）。
+  // 代價：用戶下次開站要重新 precache 約 22MB（一次性，背景做）。
+  var CACHE = "uw-v11.2";
 var FONT_CACHE = "uw-fonts-v1";
 
 function parts(prefix, n) {
