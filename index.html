@@ -191,7 +191,7 @@
       .btnrow { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0 14px; }
       button.btn {
         font-family: inherit; font-size: 14.5px; font-weight: 700;
-        border-radius: 10px; padding: 10px 16px;
+        border-radius: 10px; padding: 10px 16px; min-height: 44px;
         border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
         cursor: pointer; display: inline-flex; align-items: center; gap: 8px;
       }
@@ -259,6 +259,103 @@
       @media (prefers-reduced-motion: reduce) {
         .status.busy .dot { animation: none; }
       }
+
+    /* ===== v11.1 WP5：版面重構 ===== */
+    .workspace { display: block; }
+    .sheet-handle, .sheet-fab, .sheet-backdrop { display: none; }
+
+    /* 桌面（>=980px）：左畫布 / 右控件兩欄，控件自己捲，畫布 sticky */
+    @media (min-width: 980px) {
+      .wrap { max-width: 1200px; }
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) clamp(340px, 30vw, 420px);
+        column-gap: 20px;
+        align-items: start;
+      }
+      #stage        { grid-column: 1; grid-row: 1; position: sticky; top: 14px;
+                      /* 直倒相喺寬欄會左右各留一大條黑邊 → 盒仔貼住張相 */
+                      width: fit-content; max-width: 100%;
+                      margin-left: auto; margin-right: auto; }
+      #stage.sticky canvas.result { max-height: 68vh; }
+      #rawBadge     { grid-column: 1; grid-row: 2; }
+      #sampleHint   { grid-column: 1; grid-row: 3; }
+      .side {
+        grid-column: 2; grid-row: 1 / span 3;
+        display: flex; flex-direction: column; min-height: 0;
+        /* 由 JS 量度 header 實際高度後餵入，避免固定值令導出區剛好掉出視窗 */
+        max-height: var(--side-max, calc(100vh - 124px));
+        padding-left: 16px; border-left: 1px solid var(--line);
+      }
+      #controls {
+        flex: 1 1 auto; min-height: 0;
+        overflow-y: auto; overscroll-behavior: contain;
+        padding: 2px 8px 2px 0;
+      }
+      #actions {
+        flex: 0 0 auto; margin-top: 10px; padding-top: 10px;
+        border-top: 1px solid var(--line);
+        background: var(--bg);
+      }
+      #actions .btn.primary { width: 100%; justify-content: center; }
+      /* 欄窄時「最高畫質」會斷成「最高畫／質」→ 說明文字自己一行 */
+      #actions .dltier { line-height: 1.45; }
+      #actions .dltier small { display: block; margin-left: 24px; }
+    }
+
+    /* 手機／窄屏（<980px）：控件變底部抽屜，畫布保持單欄 */
+    @media (max-width: 979px) {
+      .side { display: block; }
+      #controls {
+        position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+        max-height: 76vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+        background: var(--panel);
+        border-top: 1px solid var(--line);
+        border-top-left-radius: 18px; border-top-right-radius: 18px;
+        padding: 4px 16px calc(92px + env(safe-area-inset-bottom)) 16px;
+        transform: translateY(106%); transition: transform .26s ease;
+        box-shadow: 0 -12px 32px rgba(0, 0, 0, .45);
+      }
+      #controls.sheet-open { transform: none; }
+      #controls.hidden { display: none; }
+      #controls h2 { font-size: 17px; }
+      .sheet-handle {
+        display: flex; align-items: center; justify-content: center; gap: 8px;
+        height: 44px; font-size: 12.5px; font-weight: 700; color: var(--ink-dim);
+        cursor: pointer; position: sticky; top: 0; background: var(--panel); z-index: 2;
+      }
+      .sheet-handle span { width: 44px; height: 4px; border-radius: 2px; background: var(--line); }
+      .sheet-fab {
+        position: fixed; right: 16px; bottom: calc(150px + env(safe-area-inset-bottom));
+        z-index: 55; display: inline-flex; align-items: center; gap: 8px;
+        padding: 13px 18px; border-radius: 999px;
+        border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink);
+        font-weight: 800; font-size: 14.5px; font-family: inherit;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+      }
+      .sheet-fab.hidden { display: none; }
+      .sheet-backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .45); }
+      .sheet-backdrop.on { display: block; }
+      body.sheet-lock { overflow: hidden; }
+      #actions {
+        position: sticky; bottom: 0; z-index: 45;
+        background: linear-gradient(180deg, rgba(0,0,0,0) 0%, var(--bg) 38%);
+        padding: 10px 0 calc(10px + env(safe-area-inset-bottom));
+        margin-top: 4px;
+      }
+      #actions .btn { flex: 1 1 auto; justify-content: center; }
+    }
+
+    /* HSL 色片（v11.1：24 條 HSL 滑桿收成 8 個色片 + 3 條） */
+    .hsl-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 6px; }
+    .hsl-chip {
+      width: 34px; height: 34px; border-radius: 50%; cursor: pointer;
+      border: 2px solid transparent; padding: 0; background: var(--chip);
+      box-shadow: 0 0 0 1px var(--line) inset; font-size: 0;
+    }
+    .hsl-chip[aria-pressed="true"] { border-color: var(--ink); box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); }
+    .hsl-pane.hidden { display: none; }
+    .hsl-pane .row:first-child { margin-top: 2px; }
     </style>
   </head>
   <body>
@@ -288,6 +385,8 @@
       <input type="file" id="fileInput" accept=".arw,.jpg,.jpeg,image/jpeg" class="hidden" />
 
       <!-- 對比舞台 -->
+      <!-- v11.1 WP5：workspace 容器。桌面 = 左畫布 / 右控件兩欄；手機 = 單欄 + 底部抽屜 -->
+      <div class="workspace" id="workspace">
       <div class="stage hidden sticky" id="stage">
         <canvas class="result" id="resultCanvas"></canvas>
         <canvas class="orig" id="origCanvas"></canvas>
@@ -299,7 +398,9 @@
       <div class="sample-hint" id="sampleHint">💧 取樣模式：撳相入面最白或者中性灰嘅位置（例如白牆、白衫），做白平衡基準。</div>
 
       <!-- 控制區 -->
+      <div class="side" id="side">
       <section class="controls hidden" id="controls">
+        <div class="sheet-handle" id="sheetHandle" role="button" tabindex="0" aria-label="收起調整面板"><span></span>調整</div>
         <h2>AI 還原</h2>
         <div class="row">
           <label for="aiStrength">AI 強度</label>
@@ -380,13 +481,18 @@
         <button class="btn" id="resetBtn" type="button">↺ 重置微調</button>
         <button class="btn" id="newPhotoBtn" type="button">換一張相</button>
       </div>
+      </div><!-- /side -->
+      </div><!-- /workspace -->
       <div class="dlresult hidden" id="dlResult">
         <div id="dlText"></div>
         <img id="dlImg" alt="還原完成圖（可長按儲存）" />
       </div>
 
+      <button class="sheet-fab hidden" id="sheetFab" type="button">🎛 調整</button>
+      <div class="sheet-backdrop" id="sheetBackdrop"></div>
+
       <footer>
-        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v11.0 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）<br />💡 貼士：第一次開站會下載約 22 MB 檔案嚟準備離線版；將本站「加入主畫面」之後離線用最穩陣，iOS 若長時間唔用可能會清除快取，屆時連線開一次就會自動重新準備。
+        模型：Shallow-UWnet（開源水下圖像增強網絡）＋ PP-HumanSeg（開源人物分割，皮膚選區用）以 ONNX 格式分塊存放於本站，用 ONNX Runtime Web 喺瀏覽器本機推理。所有運算喺你嘅裝置進行，唔會上傳相片。<br />版本 v11.1 · RAW 引擎：LibRaw 1.6.0（真 16-bit 解碼）<br />💡 貼士：第一次開站會下載約 22 MB 檔案嚟準備離線版；將本站「加入主畫面」之後離線用最穩陣，iOS 若長時間唔用可能會清除快取，屆時連線開一次就會自動重新準備。
       </footer>
     </div>
 
@@ -410,6 +516,51 @@
     var stage = $("stage"), resultCanvas = $("resultCanvas"), origCanvas = $("origCanvas");
     var divider = $("divider"), sampleHint = $("sampleHint");
     var controls = $("controls"), actions = $("actions");
+
+    /* ===== v11.1 WP5：手機底部抽屜 ===== */
+    var sheetFab = $("sheetFab"), sheetBackdrop = $("sheetBackdrop"), sheetHandle = $("sheetHandle");
+    function setSheet(open) {
+      if (!controls) return;
+      controls.classList.toggle("sheet-open", !!open);
+      if (sheetBackdrop) sheetBackdrop.classList.toggle("on", !!open);
+      document.body.classList.toggle("sheet-lock", !!open);
+    }
+    if (sheetFab) sheetFab.addEventListener("click", function () {
+      setSheet(!controls.classList.contains("sheet-open"));
+    });
+    if (sheetHandle) {
+      sheetHandle.addEventListener("click", function () { setSheet(false); });
+      sheetHandle.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSheet(false); }
+      });
+    }
+    if (sheetBackdrop) sheetBackdrop.addEventListener("click", function () { setSheet(false); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") setSheet(false); });
+    // Vic-2 D4：手機開抽屜後縮到桌面，類別會殘留（body.sheet-lock / #controls.sheet-open）
+    // 雖然實測未造成可見故障，但縮回手機時抽屜仍是開的 → 斷點切換時清一次
+    window.addEventListener("resize", function () {
+      if (window.innerWidth >= 980) setSheet(false);
+    });
+    // v11.1 WP5：右欄高度 = 視窗高 - header 實際高度（唔用固定值，免得導出區掉出首屏）
+    (function () {
+      var sideEl = $("side"), head = document.querySelector("header.top");
+      function syncSide() {
+        if (!sideEl) return;
+        if (window.innerWidth < 980) { sideEl.style.removeProperty("--side-max"); return; }
+        var top = head ? head.getBoundingClientRect().bottom : 96;
+        var max = Math.max(320, Math.round(window.innerHeight - top - 16));
+        sideEl.style.setProperty("--side-max", max + "px");
+      }
+      syncSide();
+      window.addEventListener("resize", syncSide);
+      if (window.ResizeObserver && head) { try { new ResizeObserver(syncSide).observe(head); } catch (e) {} }
+    })();
+    // FAB 可見性跟 controls 同步（避免逐個 call site 改）
+    if (sheetFab && controls && window.MutationObserver) {
+      new MutationObserver(function () {
+        sheetFab.classList.toggle("hidden", controls.classList.contains("hidden"));
+      }).observe(controls, { attributes: true, attributeFilter: ["class"] });
+    }
 
     function setStatus(mode, text) {
       statusEl.className = "status " + mode;
@@ -563,7 +714,7 @@
 
     /* ============ v5: RAW / 專業面板狀態 ============ */
     var rawMode = false, rawVia = null, rawNote = null;             // 而家呢張係咪 RAW 解出嚟
-    var rawStore = null;             // {data:Float32Array(0-1), w, h} 16-bit 解碼暫存
+    var rawStore = null;             // {u16:Uint16Array, max, w, h} 16-bit 解碼暫存（v11.1：唔再預轉 Float32）
     var rawFullCanvas = null;        // RAW 開發後全解像 8-bit canvas（AI 輸入用）
     var rawMeta = null;              // {camera, model...} 顯示用
     var imgSrc = null;               // 上傳源：JPEG=origImg(Image)，RAW=null（用 rawFullCanvas）
@@ -748,6 +899,11 @@
       dlCacheDrop(); // v10.9: 換相即丟舊緩存
       // v11.0: 上一張嘅大畫布要立即釋放，否則新圖解碼時要同未回收記憶體爭（見 releaseHeavyBuffers）
       releaseHeavyBuffers();
+      // Ray-2 P2：載入期間收起控件，避免「上一張的狀態 + 已清零的 origFull」→ 一按導出得全黑圖
+      try {
+        controls.classList.add("hidden"); actions.classList.add("hidden");
+        $("downloadBtn").disabled = true;   // Ray-2 D1 第 3 層：唔好留低可按的導出鈕
+      } catch (eHP) {}
       var name = file.name || "";
       currentKey = name + "|" + (file.size | 0) + "|" + (file.lastModified | 0); // v11.0 F-05: 按圖隔離
       file.__seq = ++loadSeq; // v11.0 P2-8
@@ -768,6 +924,68 @@
         showError("呢個檔案唔係相片，請揀返一張 ARW 或者 JPEG。");
         return;
       }
+      // v11.1 P2-3（Ray-2 訂正）：JPEG 完整性檢查——缺少 EOI（FF D9）即代表檔案被截斷。
+      // 實測 30%/50% 截斷會令預覽全黑、70%+ 截斷會「預覽正常但導出近乎全黑（mean 8.3 vs 預覽 124）」，
+      // 兩者 onload 都成功、畫面都顯示，用戶唔會知道出咗事。
+      (function () {
+        var seq = file.__seq;
+        var go = function () { if (file.__seq === loadSeq) loadJpeg(file); };
+        try {
+          // 語義（Vic-2 B2/E/1KB/1.5KB 矩陣實測定稿）：尾段 **8KB 內任何位置存在** FF D9 即放行。
+          // 為甚麼是 8KB：64B 會誤拒 200B trailer、1KB 會誤拒 1,024B trailer（差 2B）、
+          // 4KB 會誤拒 8KB 級；而讀 8KB 與讀 64B 成本相同（一次小讀），一次過消滅整類誤拒。
+          //   ✗ 只比對尾 2 bytes → 會誤拒「EOI 後有 padding」的正常相片（尾 00 00）
+          //   ✗ 要求最後一次出現在末尾 → 會誤拒 trailer 含 FF D9 的正常相片
+          // 技術依據：JPEG 熵編碼段內 FF 必須 byte-stuff 成 FF 00，故 FF D9 不可能合法出現在 scan → 假接受機率≈0。
+          file.slice(Math.max(0, file.size - 8192)).arrayBuffer().then(function (bb) {
+            if (seq !== file.__seq || file.__seq !== loadSeq) return;
+            var u = new Uint8Array(bb), found = false, k;
+            for (k = 0; k + 1 < u.length; k++) {
+              if (u[k] === 0xFF && u[k + 1] === 0xD9) { found = true; break; }
+            }
+            if (found) { go(); return; }
+            failImport("呢個 JPEG 唔完整（尾段搵唔到結束標記 FF D9），通常係下載中斷或者傳輸被截斷。請重新下載原檔，或者轉存一次再上載。");
+          }).catch(go);   // 讀唔到就唔好誤殺，照常載入
+        } catch (e) { go(); }
+      })();
+      return;
+    }
+
+    // 載入失敗的統一收尾（Ray-2 D1：唔可以留低「上一張狀態 + 已清零 origFull」）
+    function failImport(msg) {
+      origImg = null; imgSrc = null; fullW = 0; fullH = 0;
+      try { releaseHeavyBuffers(); } catch (eRB) {}   // origFull 等大畫布即時回收，唔等下次導入
+      try {
+        dropzone.classList.remove("hidden");
+        stage.classList.add("hidden");
+        controls.classList.add("hidden"); actions.classList.add("hidden");
+        $("downloadBtn").disabled = true;
+        var dt = $("dlText"); if (dt) dt.textContent = "";          // 唔可以殘留上一次「✅ 完成」
+        var dr = $("dlResult"); if (dr) dr.classList.add("hidden");
+      } catch (e0) {}
+      setStatus("error", "相片載入失敗");
+      showError(msg);
+    }
+
+    // v11.1 P2-3：解碼失敗的內容判據——用 **alpha**，唔用亮度。
+    // 亮度判據（max<4）會把「鏡頭蓋／全黑場景」的正常相片當成壞檔（Vic-2 C 案：真全黑 JPEG
+    // 與截斷檔的像素統計一模一樣）。而 alpha 乾淨分開：截斷 → 全透明；合法 JPEG 冇 alpha 通道 → 全不透明。
+    // 只在 origPv 上檢查（resultCanvas 係合成後重畫，兩者 alpha 都係 255）。
+    function previewIsTransparent() {
+      try {
+        if (!origPv || !origPv.width) return false;   // 判斷唔到 → 放行（與 EOI 的 catch 同語義）
+        var g = origPv.getContext("2d");
+        var strips = 8, zero = 0, n = 0, i, y, d;
+        for (var k = 0; k < strips; k++) {
+          y = Math.min(origPv.height - 1, Math.floor((k + 0.5) * origPv.height / strips));
+          d = g.getImageData(0, y, origPv.width, 1).data;
+          for (i = 3; i < d.length; i += 4) { if (d[i] === 0) zero++; n++; }
+        }
+        return n > 0 && (zero / n) > 0.99;
+      } catch (e) { return false; }
+    }
+
+    function loadJpeg(file) {
       clearError();
       // v5: 切返普通相，重置 RAW 狀態
       rawMode = false; rawStore = null; rawMeta = null; rawFullCanvas = null;
@@ -800,17 +1018,21 @@
             fullW = w0; fullH = h0;
           }
           buildCanvases();
+          // 必須喺 afterImageReady 之前：否則 AI 照跑、狀態變成「AI 還原完成」，會再次把失敗掩蓋成成功
+          if (previewIsTransparent()) {
+            failImport("呢張 JPEG 解碼唔出任何像素（檔案可能中段損壞）。請重新下載原檔再試。");
+            return;
+          }
           afterImageReady("JPG");
         } catch (e) {
           // v11.0 P0-1/P2-9: 失敗要回滾半成品狀態（否則守衛照樣通過 → 黑畫面無提示）
-          origImg = null; imgSrc = null; fullW = 0; fullH = 0;
-          setStatus("error", "相片載入失敗");
-          showError("相片載入失敗：" + (e && e.message ? e.message : e) + "。可能係尺寸過大或者檔案損壞。");
+          failImport("相片載入失敗：" + (e && e.message ? e.message : e) + "。可能係尺寸過大或者檔案損壞。");
         }
       };
       img.onerror = function () {
         URL.revokeObjectURL(url);
-        showError("讀唔到呢張相，試下另一張或者轉做 JPG 先。");
+        if (file.__seq !== loadSeq) return;         // 已被更新的上傳取代
+        failImport("解碼唔到呢張 JPEG（檔案可能損壞）。試下另一張，或者轉存一次再上載。");
       };
       img.src = url;
     }
@@ -1972,7 +2194,7 @@
     /* ===== v10.9 導出重寫：分級＋分條渲染＋緩存預備 =====
        背景（v10.8 真機）：導入、修圖正常，一撳導出成頁跳返導入畫面——iOS
        jetsam 殺頁重載。盤點 v10.8 導出嗰刻同時存在嘅全尺寸 buffer（16MP
-       導出、RAW 全尺寸來源計）：rawStore 395MB（全尺寸 Float32 解碼）＋
+       導出、RAW 全尺寸來源計）：rawStore 395MB（全尺寸 Float32 解碼；v11.1 已降至 ≈197MB Uint16）＋
        origFull/aiFull/rawFullCanvas 各 132MB＋成品畫布 64MB＋RAW baseC 64MB
        ＋合併層（buildChromaAiPv 喺 12.5MP 開 Y/cbR/crR/cbS/crS/ws 六個
        Float32 陣列 ≈300MB，連 aiScaled/aiD/origD/成品 ImageData ≈450MB）＋
@@ -2534,6 +2756,11 @@
     }
     $("downloadBtn").addEventListener("click", async function () {
       if ((!origImg && !rawMode) || dlBusy) return;
+      // Ray-2 P2：最後防線——origFull 已被清零時唔好出全黑圖
+      if (!origFull || origFull.width === 0 || origFull.height === 0) {
+        showError("影像尚未準備好（或者上一張載入失敗），請重新上載一次。");
+        return;
+      }
       var btn = this;
       var tier = dlTier();
       var dims = dlTierDims(tier);
@@ -3025,26 +3252,70 @@
       if (proBuilt) return; proBuilt = true;
       var host = $("proGroups");
       if (!host) return;
+      function mkRow(r) {
+        var row = el("div", "row");
+        var lab = el("label", null, r.label); lab.htmlFor = r.id;
+        var inp = document.createElement("input");
+        inp.type = "range"; inp.id = r.id;
+        inp.min = r.min; inp.max = r.max; inp.step = r.step; inp.value = r.def;
+        var val = el("span", "val", null); val.id = r.id + "Val";
+        row.appendChild(lab); row.appendChild(inp); row.appendChild(val);
+        bindSlider(inp, val, r.suffix || "");
+        return row;
+      }
+      // v11.1 WP5：24 條 HSL 滑桿收成 8 個色片，每片只顯示 3 條（色相/飽和/明度）
+      var HSL_COLORS = [
+        { k: "r", hex: "#e5484d", name: "紅" }, { k: "o", hex: "#f76b15", name: "橙" },
+        { k: "y", hex: "#f5d90a", name: "黃" }, { k: "g", hex: "#30a46c", name: "綠" },
+        { k: "c", hex: "#00a2c7", name: "青" }, { k: "b", hex: "#3b82f6", name: "藍" },
+        { k: "p", hex: "#8e4ec6", name: "紫" }, { k: "m", hex: "#d6409f", name: "品紅" }
+      ];
       PRO_GROUPS.forEach(function (g) {
         var det = el("details", "sel"); if (g.open) det.open = true;
         det.appendChild(el("summary", null, g.title));
         var body = el("div", "sel-body"); det.appendChild(body);
+        var hsl = {};
         g.rows.forEach(function (r) {
-          var row = el("div", "row");
-          var lab = el("label", null, r.label); lab.htmlFor = r.id;
-          var inp = document.createElement("input");
-          inp.type = "range"; inp.id = r.id;
-          inp.min = r.min; inp.max = r.max; inp.step = r.step; inp.value = r.def;
-          var val = el("span", "val", null); val.id = r.id + "Val";
-          row.appendChild(lab); row.appendChild(inp); row.appendChild(val);
-          body.appendChild(row);
-          bindSlider(inp, val, r.suffix || "");
+          if (/^hsl_/.test(r.id)) { hsl[r.id] = mkRow(r); }
+          else { body.appendChild(mkRow(r)); }
         });
+        if (Object.keys(hsl).length) {
+          var chips = el("div", "hsl-chips");
+          var panes = el("div", "hsl-panes");
+          var btns = [];
+          var select = function (k) {
+            btns.forEach(function (x) {
+              x.setAttribute("aria-pressed", x.getAttribute("data-k") === k ? "true" : "false");
+            });
+            Array.prototype.forEach.call(panes.children, function (p) {
+              p.classList.toggle("hidden", p.getAttribute("data-k") !== k);
+            });
+          };
+          HSL_COLORS.forEach(function (c) {
+            var chip = document.createElement("button");
+            chip.type = "button"; chip.className = "hsl-chip";
+            chip.setAttribute("data-k", c.k);
+            chip.setAttribute("aria-label", "調整 " + c.name + " 色");
+            chip.setAttribute("aria-pressed", "false");
+            chip.style.setProperty("--chip", c.hex);
+            chip.addEventListener("click", function () { select(c.k); });
+            btns.push(chip); chips.appendChild(chip);
+            var pane = el("div", "hsl-pane hidden");
+            pane.setAttribute("data-k", c.k);
+            ["h", "s", "l"].forEach(function (t) {
+              var row = hsl["hsl_" + c.k + "_" + t];
+              if (row) pane.appendChild(row);
+            });
+            panes.appendChild(pane);
+          });
+          body.appendChild(chips); body.appendChild(panes);
+          select("r");
+        }
         var br = el("div", "btnrow");
-        var b = el("button", "btn", "↺ 重設" + g.reset);
-        b.type = "button";
+        var rb = el("button", "btn", "↺ 重設" + g.reset);
+        rb.type = "button";
         (function (rows) {
-          b.addEventListener("click", function () {
+          rb.addEventListener("click", function () {
             rows.forEach(function (r) {
               var e = $(r.id);
               if (e) { e.value = r.def; e.dispatchEvent(new Event("input")); }
@@ -3052,7 +3323,7 @@
             requestRender();
           });
         })(g.rows);
-        br.appendChild(b); body.appendChild(br);
+        br.appendChild(rb); body.appendChild(br);
         host.appendChild(det);
       });
     }
@@ -3102,7 +3373,8 @@
     // v10.9: 只開發 [y0, y0+rows) 行（採樣公式同全圖版逐點一致），分條導出用
     function developRawSampledRows(ev, dw, dh, y0, rows) {
       dw = Math.max(1, dw | 0); dh = Math.max(1, dh | 0);
-      var sw = rawStore.w, sh = rawStore.h, sd = rawStore.data;
+      var sw = rawStore.w, sh = rawStore.h, sd = rawStore.u16;
+      var inv = 1 / (rawStore.max || 65535);   // v11.1：0..65535 → 0..1，喺取樣時才算
       var gain = Math.pow(2, ev);
       var out = new ImageData(dw, rows), px = out.data;
       var x, ly, y, sx, sy, si, di;
@@ -3127,11 +3399,11 @@
                 sr += sd[si2]; sg += sd[si2 + 1]; sb += sd[si2 + 2]; cnt++;
               }
             }
-            rr = sr / cnt; gg = sg / cnt; bb = sb / cnt;
+            rr = sr * inv / cnt; gg = sg * inv / cnt; bb = sb * inv / cnt;
           } else {
             sx = Math.min(sw - 1, Math.round(x * scaleX));
             si = (sy * sw + sx) * 3;
-            rr = sd[si]; gg = sd[si + 1]; bb = sd[si + 2];
+            rr = sd[si] * inv; gg = sd[si + 1] * inv; bb = sd[si + 2] * inv;
           }
           px[di]     = Math.min(255, Math.max(0, Math.round(Math.min(1, rr * gain) * 255)));
           px[di + 1] = Math.min(255, Math.max(0, Math.round(Math.min(1, gg * gain) * 255)));
@@ -3340,20 +3612,32 @@
             img = await raw.imageData();
             try { raw.dispose(); } catch (e) {}
             step = "轉換像素";
+            // v11.1 WP2b-3：**唔再**預先轉 Float32。32.9MP 要 3n 個 float ≈395MB，
+            // 而且 9,870 萬次迴圈全喺主線程（實測把 rAF 拖到 700–900ms）。
+            // 改為保留 Uint16（6 bytes/px，≈197MB），喺 develop 取樣時先乘 1/max。
             var w = img.width, h = img.height, data = img.data, n = w * h, i;
             if (!w || !h || !data) throw new Error("imageData 回傳空（w=" + w + ",h=" + h + "）");
-            var f32 = new Float32Array(n * 3);
-            var u16 = null;
-            if (data instanceof Uint16Array) u16 = data;
-            else if (data && data.length === n * 6 && data.buffer) { try { u16 = new Uint16Array(data.buffer); } catch (e) {} }
-            if (u16 && u16.length >= n * 3) {
-              for (i = 0; i < n * 3; i++) f32[i] = u16[i] / 65535;
-            } else if (data && data.length >= n * 3) {
-              for (i = 0; i < n * 3; i++) f32[i] = data[i] / 255;
-            } else {
-              throw new Error("像素格式唔識（len=" + (data && data.length) + "）");
+            var u16 = null, maxv = 65535;
+            if (data instanceof Uint16Array && data.length >= n * 3) {
+              u16 = data;
+            } else if (data && data.buffer && data.length === n * 6) {
+              // Ray-2 P2：必須帶 byteOffset，否則若上游回「大 buffer 的子視圖」會由 offset 0 讀起 → 整幅錯位，
+              // 而 u.length >= n*3 這個守衛擋唔住（heap 視圖長度永遠夠）。
+              try {
+                var u = new Uint16Array(data.buffer, data.byteOffset || 0, n * 3);
+                u16 = u;
+              } catch (e) {}
             }
-            return { f32: f32, w: w, h: h, meta: null, via: "16-bit RAW" };
+            if (!u16) {
+              if (!(data && data.length >= n * 3)) {
+                throw new Error("像素格式唔識（len=" + (data && data.length) + "）");
+              }
+              // 8-bit 來源（罕見）：升做 16-bit 容器，用 max=255 還原
+              u16 = new Uint16Array(n * 3);
+              for (i = 0; i < n * 3; i++) u16[i] = data[i];
+              maxv = 255;
+            }
+            return { u16: u16, max: maxv, w: w, h: h, meta: null, via: "16-bit RAW" };
           } catch (e) {
             throw new Error("@" + step + "：" + (e && e.message ? e.message : String(e)));
           }
@@ -3384,7 +3668,18 @@
       work.then(function (r) {
         if (file.__seq !== loadSeq) { done(); return; } // v11.0 P2-8: 較舊的 RAW 唔好蓋過新圖
         rawMode = true;
-        rawStore = { data: r.f32, w: r.w, h: r.h };
+        if (r.u16) {
+          rawStore = { u16: r.u16, max: r.max || 65535, w: r.w, h: r.h };
+        } else {
+          // WASM 失敗走內嵌 JPEG 兜底：仍係 Float32，一次性轉 Uint16（細圖，成本可接受）
+          var n3 = r.w * r.h * 3, arr = new Uint16Array(n3);
+          for (var qi = 0; qi < n3; qi++) {
+            var vv = r.f32[qi];
+            arr[qi] = vv <= 0 ? 0 : (vv >= 1 ? 65535 : Math.round(vv * 65535));
+          }
+          rawStore = { u16: arr, max: 65535, w: r.w, h: r.h };
+          r.f32 = null;
+        }
         rawMeta = r.meta;
         fullW = r.w; fullH = r.h;
         imgSrc = null;
@@ -3429,6 +3724,7 @@
       stage.classList.remove("hidden");
       controls.classList.remove("hidden");
       actions.classList.remove("hidden");
+      try { $("downloadBtn").disabled = false; } catch (eDB) {}
       updateCompare();
       updateDlTierNotes();
       requestRender();
@@ -3451,7 +3747,7 @@
        第一次在線開站，SW 會將全部關鍵資產存入快取；完成後斷網都用得晒。
        狀態如實顯示：未數齊資產唔會扮已準備好。 */
     (function () {
-      var VERSION = "v11.0";
+      var VERSION = "v11.1";
       function el() { return document.getElementById("offlineStatus"); }
       function setUI(t) { var e = el(); if (e) e.textContent = t; }
       if (!("serviceWorker" in navigator)) {

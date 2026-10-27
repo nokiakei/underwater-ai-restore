@@ -7,6 +7,8 @@
    載入唔到就用系統字型，唔影響任何功能。 */
 "use strict";
 
+// v11.1：資產（模型/ort/raw16）未變，只改 index.html 與 sw.js，而導航請求行 network-first，
+// 故此處刻意**不升** cache 名，免得用戶白白重新下載 22MB 模型。
 var CACHE = "uw-v11.0";
 var FONT_CACHE = "uw-fonts-v1";
 
